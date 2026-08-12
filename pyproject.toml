@@ -5,15 +5,33 @@ build-backend="hatchling.build"
 [project]
 name="dcc-mcp-sketchup"
 version="0.1.0"
-description="SketchUp adapter foundation for DCC-MCP"
+description="Production SketchUp adapter with an authenticated Ruby main-thread bridge for DCC-MCP"
 readme="README.md"
 requires-python=">=3.9"
 license={text="MIT"}
 authors=[{name="loonghao",email="hal.long@outlook.com"}]
-dependencies=["dcc-mcp-core>=0.19.45,<1.0.0"]
+keywords=["sketchup","cad","3d-modeling","dcc","mcp","automation"]
+classifiers=[
+  "Development Status :: 4 - Beta",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: MacOS",
+]
+dependencies=["dcc-mcp-core>=0.19.91,<1.0.0"]
+
+[project.urls]
+Homepage="https://github.com/dcc-mcp/dcc-mcp-sketchup"
+Repository="https://github.com/dcc-mcp/dcc-mcp-sketchup"
+Issues="https://github.com/dcc-mcp/dcc-mcp-sketchup/issues"
 
 [project.optional-dependencies]
-test=["pytest>=8","ruff>=0.8"]
+test=["pytest>=8","ruff>=0.8","PyYAML>=6"]
+dev=["pytest>=8","ruff>=0.8","PyYAML>=6","build>=1.2","twine>=6"]
 
 [project.scripts]
 dcc-mcp-sketchup="dcc_mcp_sketchup.server:main"
@@ -23,7 +41,10 @@ sketchup="dcc_mcp_sketchup:SketchupMcpServer"
 
 [tool.hatch.build.targets.wheel]
 packages=["src/dcc_mcp_sketchup"]
-artifacts=["src/dcc_mcp_sketchup/skills/**"]
+artifacts=["src/dcc_mcp_sketchup/skills/**","src/dcc_mcp_sketchup/sketchup_plugin/**"]
+
+[tool.hatch.build.targets.sdist]
+exclude=["docs/**/*.png", "docs/**/*.svg", "docs/**/*.webp"]
 
 [tool.pytest.ini_options]
 testpaths=["tests"]
@@ -31,3 +52,7 @@ pythonpath=["src","."]
 
 [tool.ruff.lint]
 select=["E","F","I","B"]
+
+[tool.ruff]
+line-length=100
+target-version="py39"

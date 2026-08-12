@@ -1,0 +1,124 @@
+tools:
+  - name: list_scenes
+    description: List saved scenes with descriptions and animation state.
+    source_file: scripts/list_scenes.py
+    input_schema: {type: object, properties: {}, additionalProperties: false}
+    output_schema: {type: object}
+    execution: sync
+    affinity: main
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations: {read_only_hint: true, destructive_hint: false, idempotent_hint: true, open_world_hint: false, deferred_hint: false}
+
+  - name: create_scene
+    description: Capture the current view as a uniquely named scene.
+    source_file: scripts/create_scene.py
+    input_schema:
+      type: object
+      required: [name]
+      properties:
+        name: {type: string, minLength: 1}
+        description: {type: string}
+        include_in_animation: {type: boolean, default: true}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: main
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: false}
+
+  - name: update_scene
+    description: Rename, describe, recapture, or change animation inclusion for a scene.
+    source_file: scripts/update_scene.py
+    input_schema:
+      type: object
+      required: [name]
+      properties:
+        name: {type: string, minLength: 1}
+        new_name: {type: string, minLength: 1}
+        description: {type: string}
+        include_in_animation: {type: boolean}
+        capture_current_view: {type: boolean, default: false}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: main
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: true, open_world_hint: false, deferred_hint: false}
+
+  - name: remove_scene
+    description: Remove a named saved scene; the operation remains undoable.
+    source_file: scripts/remove_scene.py
+    input_schema:
+      type: object
+      required: [name]
+      properties: {name: {type: string, minLength: 1}}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: main
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations: {read_only_hint: false, destructive_hint: true, idempotent_hint: false, open_world_hint: false, deferred_hint: false}
+
+  - name: list_tags
+    description: List Tags, visibility, active state, and the protected default tag.
+    source_file: scripts/list_tags.py
+    input_schema: {type: object, properties: {}, additionalProperties: false}
+    output_schema: {type: object}
+    execution: sync
+    affinity: main
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations: {read_only_hint: true, destructive_hint: false, idempotent_hint: true, open_world_hint: false, deferred_hint: false}
+
+  - name: create_tag
+    description: Create a uniquely named SketchUp Tag with optional visibility.
+    source_file: scripts/create_tag.py
+    input_schema:
+      type: object
+      required: [name]
+      properties:
+        name: {type: string, minLength: 1}
+        visible: {type: boolean, default: true}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: main
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: false}
+
+  - name: assign_tag
+    description: Assign a Tag to an entity by persistent ID.
+    source_file: scripts/assign_tag.py
+    input_schema:
+      type: object
+      required: [entity_id, tag]
+      properties:
+        entity_id: {type: integer, minimum: 1}
+        tag: {type: string, minLength: 1}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: main
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: true, open_world_hint: false, deferred_hint: false}
+
+  - name: remove_tag
+    description: Remove an unused non-default Tag, refusing deletion while assigned.
+    source_file: scripts/remove_tag.py
+    input_schema:
+      type: object
+      required: [name]
+      properties: {name: {type: string, minLength: 1}}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: main
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations: {read_only_hint: false, destructive_hint: true, idempotent_hint: false, open_world_hint: false, deferred_hint: false}
