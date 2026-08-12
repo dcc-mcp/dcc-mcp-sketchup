@@ -1,2 +1,19 @@
-{"release-type":"python","package-name":"dcc-mcp-sketchup","include-component-in-tag":true}
-
+{
+  "packages": {
+    ".": {
+      "release-type": "python",
+      "package-name": "dcc-mcp-sketchup",
+      "changelog-path": "CHANGELOG.md",
+      "include-component-in-tag": false,
+      "extra-files": [
+        {"type": "toml", "path": "pyproject.toml", "jsonpath": "$.project.version"},
+        {"type": "generic", "path": "src/dcc_mcp_sketchup/__version__.py"},
+        {"type": "generic", "path": "src/dcc_mcp_sketchup/sketchup_plugin/registration.rb"},
+        {"type": "generic", "path": "src/dcc_mcp_sketchup/skills/sketchup-session/SKILL.md"},
+        {"type": "generic", "path": "src/dcc_mcp_sketchup/skills/sketchup-modeling/SKILL.md"},
+        {"type": "generic", "path": "src/dcc_mcp_sketchup/skills/sketchup-materials/SKILL.md"},
+        {"type": "generic", "path": "src/dcc_mcp_sketchup/skills/sketchup-scenes/SKILL.md"}
+      ]
+    }
+  }
+}

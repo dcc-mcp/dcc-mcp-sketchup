@@ -1,20 +1,75 @@
 name: CI
 
 on:
-  pull_request:
+  workflow_dispatch:
   push:
+    branches: [main, "release-please--branches--**"]
+  pull_request:
     branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: Test Python ${{ matrix.python }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.9", "3.10", "3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[test]"
-      - run: python -m ruff check src tests
-      - run: python -m ruff format --check src tests
       - run: python -m pytest
 
+  ruby-extension:
+    name: Ruby ${{ matrix.ruby }} extension contract on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        ruby: ["2.7", "3.2"]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+      - name: Check Ruby syntax
+        run: >-
+          ruby -e 'Dir["{src/dcc_mcp_sketchup/sketchup_plugin,tests/ruby}/**/*.rb"].sort.each { |file| abort("syntax failed: #{file}") unless system(RbConfig.ruby, "-c", file) }'
+      - name: Run Ruby contract tests
+        run: ruby -e 'Dir["tests/ruby/test_*.rb"].sort.each { |file| require File.expand_path(file) }'
+
+  lint-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m ruff check src tests
+      - run: python -m ruff format --check src tests
+      - run: python -m build
+      - run: python -m twine check dist/*
+      - name: Smoke test the built wheel
+        shell: bash
+        run: |
+          python -m pip install --force-reinstall --no-deps dist/*.whl
+          python -c "import importlib.metadata as m, importlib.resources as r, dcc_mcp_sketchup as p; assert p.__version__ == m.version('dcc-mcp-sketchup'); root = r.files('dcc_mcp_sketchup'); assert root.joinpath('sketchup_plugin', 'runtime.rb').is_file(); assert root.joinpath('skills', 'sketchup-session', 'SKILL.md').is_file()"
+          python -c "import importlib.metadata as m, subprocess; expected = m.version('dcc-mcp-sketchup'); actual = subprocess.check_output(['dcc-mcp-sketchup', '--version'], text=True).strip(); assert actual == expected, (actual, expected)"

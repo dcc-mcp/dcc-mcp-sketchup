@@ -1,0 +1,176 @@
+tools:
+  - name: add_box
+    description: Create a grouped rectangular box at an origin using explicit units.
+    source_file: scripts/add_box.py
+    input_schema:
+      type: object
+      required: [width, depth, height]
+      properties:
+        origin:
+          type: array
+          minItems: 3
+          maxItems: 3
+          items: {type: number}
+          default: [0, 0, 0]
+        width: {type: number, exclusiveMinimum: 0}
+        depth: {type: number, exclusiveMinimum: 0}
+        height: {type: number, exclusiveMinimum: 0}
+        unit: {type: string, enum: [inches, feet, millimeters, centimeters, meters], default: meters}
+        name: {type: string, minLength: 1}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: main
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: false}
+    call_examples:
+      - arguments: {origin: [0, 0, 0], width: 2.0, depth: 1.2, height: 0.8, unit: meters, name: TestBox}
+        note: Create a two-meter grouped box for interchange testing
+
+  - name: add_cylinder
+    description: Create a grouped vertical cylinder with bounded segment count.
+    source_file: scripts/add_cylinder.py
+    input_schema:
+      type: object
+      required: [radius, height]
+      properties:
+        center:
+          type: array
+          minItems: 3
+          maxItems: 3
+          items: {type: number}
+          default: [0, 0, 0]
+        radius: {type: number, exclusiveMinimum: 0}
+        height: {type: number, exclusiveMinimum: 0}
+        segments: {type: integer, minimum: 3, maximum: 128, default: 24}
+        unit: {type: string, enum: [inches, feet, millimeters, centimeters, meters], default: meters}
+        name: {type: string, minLength: 1}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: main
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: false}
+
+  - name: group_entities
+    description: Group one or more root-model entities and assign a name.
+    source_file: scripts/group_entities.py
+    input_schema:
+      type: object
+      required: [entity_ids]
+      properties:
+        entity_ids:
+          type: array
+          minItems: 1
+          maxItems: 500
+          uniqueItems: true
+          items: {type: integer, minimum: 1}
+        name: {type: string, minLength: 1}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: main
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: false}
+
+  - name: transform_entity
+    description: Translate, rotate, and scale one root entity in a single undoable operation.
+    source_file: scripts/transform_entity.py
+    input_schema:
+      type: object
+      required: [entity_id]
+      properties:
+        entity_id: {type: integer, minimum: 1}
+        translation:
+          type: array
+          minItems: 3
+          maxItems: 3
+          items: {type: number}
+          default: [0, 0, 0]
+        rotation_axis:
+          type: array
+          minItems: 3
+          maxItems: 3
+          items: {type: number}
+          default: [0, 0, 1]
+        rotation_degrees: {type: number, minimum: -360000, maximum: 360000, default: 0}
+        scale:
+          type: array
+          minItems: 3
+          maxItems: 3
+          items: {type: number, exclusiveMinimum: 0}
+          default: [1, 1, 1]
+        unit: {type: string, enum: [inches, feet, millimeters, centimeters, meters], default: meters}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: main
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: false}
+    call_examples:
+      - arguments: {entity_id: 123, translation: [2, 0, 0], rotation_axis: [0, 0, 1], rotation_degrees: 90, scale: [1, 1, 1], unit: meters}
+        note: Move and rotate a discovered root entity
+
+  - name: rename_entity
+    description: Rename an entity that supports SketchUp names.
+    source_file: scripts/rename_entity.py
+    input_schema:
+      type: object
+      required: [entity_id, name]
+      properties:
+        entity_id: {type: integer, minimum: 1}
+        name: {type: string, minLength: 1}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: main
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: true, open_world_hint: false, deferred_hint: false}
+
+  - name: erase_entities
+    description: Permanently erase explicitly identified root-model entities; undo remains available.
+    source_file: scripts/erase_entities.py
+    input_schema:
+      type: object
+      required: [entity_ids]
+      properties:
+        entity_ids:
+          type: array
+          minItems: 1
+          maxItems: 500
+          uniqueItems: true
+          items: {type: integer, minimum: 1}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: main
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations: {read_only_hint: false, destructive_hint: true, idempotent_hint: false, open_world_hint: false, deferred_hint: false}
+
+  - name: select_entities
+    description: Replace or extend the current selection using persistent entity IDs.
+    source_file: scripts/select_entities.py
+    input_schema:
+      type: object
+      required: [entity_ids]
+      properties:
+        entity_ids:
+          type: array
+          minItems: 1
+          maxItems: 500
+          uniqueItems: true
+          items: {type: integer, minimum: 1}
+        replace: {type: boolean, default: true}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: main
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: true, open_world_hint: false, deferred_hint: false}
