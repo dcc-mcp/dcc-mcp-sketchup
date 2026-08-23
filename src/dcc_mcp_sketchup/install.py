@@ -442,7 +442,7 @@ def _failure_result(verb: str, failure: InstallFailure) -> dict[str, Any]:
 
 def _is_restart_lock_error(error: OSError) -> bool:
     winerror = getattr(error, "winerror", None)
-    return winerror in {5, 32, 33} or (os.name == "nt" and isinstance(error, PermissionError))
+    return winerror in {5, 32, 33} or isinstance(error, PermissionError)
 
 
 def run(argv: Sequence[str]) -> tuple[dict[str, Any], int, bool]:
