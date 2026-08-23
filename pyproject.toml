@@ -28,6 +28,7 @@ dependencies=["dcc-mcp-core>=0.19.91,<1.0.0"]
 Homepage="https://github.com/dcc-mcp/dcc-mcp-sketchup"
 Repository="https://github.com/dcc-mcp/dcc-mcp-sketchup"
 Issues="https://github.com/dcc-mcp/dcc-mcp-sketchup/issues"
+Installation="https://raw.githubusercontent.com/dcc-mcp/dcc-mcp-sketchup/main/install.md"
 
 [project.optional-dependencies]
 test=["pytest>=8","ruff>=0.8","PyYAML>=6"]
