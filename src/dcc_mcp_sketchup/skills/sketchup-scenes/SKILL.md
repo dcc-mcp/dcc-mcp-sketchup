@@ -11,7 +11,7 @@ metadata:
   dcc-mcp:
     dcc: sketchup
     layer: domain
-    version: "0.1.0"  # x-release-please-version
+    version: "0.2.0"  # x-release-please-version
     stage: scene
     search-hint: "SketchUp scenes pages saved views animation tags layers assign organize"
     tags: "sketchup,scenes,tags,organization"

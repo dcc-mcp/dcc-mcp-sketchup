@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/dcc-mcp/dcc-mcp-sketchup/compare/v0.1.0...v0.2.0) (2026-08-24)
+
+
+### Features
+
+* adopt agent-first install lifecycle ([#4](https://github.com/dcc-mcp/dcc-mcp-sketchup/issues/4)) ([dbd49c9](https://github.com/dcc-mcp/dcc-mcp-sketchup/commit/dbd49c94c3db3d3da105e1f5257c8515086280b7))
+
 ## 0.1.0 (2026-08-12)
 
 

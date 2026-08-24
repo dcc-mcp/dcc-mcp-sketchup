@@ -11,7 +11,7 @@ metadata:
   dcc-mcp:
     dcc: sketchup
     layer: domain
-    version: "0.1.0"  # x-release-please-version
+    version: "0.2.0"  # x-release-please-version
     stage: modeling
     search-hint: "SketchUp create box cylinder group transform rename erase select persistent entity id"
     tags: "sketchup,modeling,geometry,transform"

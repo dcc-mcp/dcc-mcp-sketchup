@@ -11,7 +11,7 @@ metadata:
   dcc-mcp:
     dcc: sketchup
     layer: domain
-    version: "0.1.0"  # x-release-please-version
+    version: "0.2.0"  # x-release-please-version
     stage: session
     search-hint: "SketchUp session inspect entities save copy validate import export SKP DAE STL GLB"
     tags: "sketchup,session,model,interchange"
