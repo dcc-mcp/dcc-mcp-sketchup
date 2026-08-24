@@ -22,7 +22,7 @@ classifiers=[
   "Operating System :: Microsoft :: Windows",
   "Operating System :: MacOS",
 ]
-dependencies=["dcc-mcp-core>=0.19.91,<1.0.0"]
+dependencies=["dcc-mcp-core>=0.20.14,<1.0.0"]
 
 [project.urls]
 Homepage="https://github.com/dcc-mcp/dcc-mcp-sketchup"

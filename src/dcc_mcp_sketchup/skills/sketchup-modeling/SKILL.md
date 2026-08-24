@@ -5,7 +5,7 @@ description: >-
   Use for primitives, grouping, transforms, naming, selection, and explicit
   erasure. Use sketchup-session first to discover persistent entity IDs.
 license: MIT
-compatibility: "SketchUp 2021+; external sidecar Python 3.9+; dcc-mcp-core 0.19.91+"
+compatibility: "SketchUp 2021+; external sidecar Python 3.9+; dcc-mcp-core 0.20.14+"
 allowed-tools: Python
 metadata:
   dcc-mcp:

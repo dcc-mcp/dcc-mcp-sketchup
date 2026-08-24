@@ -55,7 +55,7 @@ calls the SketchUp API. Every model mutation is a named undoable operation.
 
 - SketchUp Desktop 2021 or newer on Windows or macOS.
 - Python 3.9 or newer for the external sidecar.
-- `dcc-mcp-core>=0.19.91,<1.0.0` (installed automatically).
+- `dcc-mcp-core>=0.20.14,<1.0.0` (installed automatically).
 
 Importer and exporter availability varies by SketchUp edition, version, and
 installed extensions. The adapter reports the host error instead of claiming a

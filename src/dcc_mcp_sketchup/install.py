@@ -23,7 +23,14 @@ from urllib.parse import urlsplit
 from urllib.request import url2pathname
 
 from dcc_mcp_core import __version__ as running_core_version
-from dcc_mcp_core.install_lifecycle import (
+from dcc_mcp_core.deployment import (
+    INSTALL_EXIT_ACQUIRE,
+    INSTALL_EXIT_INSTALL,
+    INSTALL_EXIT_OK,
+    INSTALL_EXIT_PREFLIGHT,
+    INSTALL_EXIT_REQUIRES_RESTART,
+    INSTALL_EXIT_VERIFY,
+    INSTALL_SOP_SCHEMA_VERSION,
     inspect_install_root,
     safe_remove_tree,
     wait_for_sidecar_ready,
@@ -34,12 +41,16 @@ from .__version__ import __version__
 EXTENSION_DIRECTORY = "dcc_mcp_sketchup"
 REGISTRATION_FILENAME = "dcc_mcp_sketchup.rb"
 MIN_SKETCHUP_VERSION = 2021
-MIN_CORE_VERSION = "0.19.91"
-SCHEMA_VERSION = 1
+MIN_CORE_VERSION = "0.20.14"
+SCHEMA_VERSION = INSTALL_SOP_SCHEMA_VERSION
 RECEIPT_RELATIVE_PATH = Path(".dcc-mcp") / "receipts" / "sketchup.json"
 BOOTSTRAP_ERRORS_RELATIVE_PATH = Path(".dcc-mcp") / "logs" / "sketchup-bootstrap-errors.jsonl"
-EXIT_OK, EXIT_PREFLIGHT, EXIT_ACQUIRE = 0, 10, 20
-EXIT_INSTALL, EXIT_VERIFY, EXIT_REQUIRES_RESTART = 30, 40, 50
+EXIT_OK = INSTALL_EXIT_OK
+EXIT_PREFLIGHT = INSTALL_EXIT_PREFLIGHT
+EXIT_ACQUIRE = INSTALL_EXIT_ACQUIRE
+EXIT_INSTALL = INSTALL_EXIT_INSTALL
+EXIT_VERIFY = INSTALL_EXIT_VERIFY
+EXIT_REQUIRES_RESTART = INSTALL_EXIT_REQUIRES_RESTART
 _VERSION_RE = re.compile(r"SketchUp\s+(\d{4})$")
 _VERSION_COMPONENT_RE = re.compile(r"^(?:0|[1-9][0-9]{0,5})$")
 _MAX_VERSION_LENGTH = 32

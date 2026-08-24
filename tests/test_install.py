@@ -1,20 +1,81 @@
+import hashlib
 import json
 import os
 import sys
+from importlib.resources import files
 from pathlib import Path
 
 import pytest
+from dcc_mcp_core.deployment import (
+    INSTALL_EXIT_ACQUIRE,
+    INSTALL_EXIT_INSTALL,
+    INSTALL_EXIT_OK,
+    INSTALL_EXIT_PREFLIGHT,
+    INSTALL_EXIT_REQUIRES_RESTART,
+    INSTALL_EXIT_VERIFY,
+    INSTALL_SOP_SCHEMA_VERSION,
+    load_install_sop_schema,
+)
 from jsonschema import Draft202012Validator
 
 from dcc_mcp_sketchup import install
 from dcc_mcp_sketchup import server as server_module
 
 ROOT = Path(__file__).parents[1]
-INSTALL_SOP_SCHEMA = json.loads(
-    (ROOT / "tests" / "fixtures" / "adapter-install-sop-v1.schema.json").read_text(encoding="utf-8")
-)
+INSTALL_SOP_SCHEMA = load_install_sop_schema()
 INSTALL_SOP_VALIDATOR = Draft202012Validator(INSTALL_SOP_SCHEMA)
 Draft202012Validator.check_schema(INSTALL_SOP_SCHEMA)
+
+
+def test_core_install_contract_floor_is_projected_everywhere():
+    floor = install.MIN_CORE_VERSION
+    assert floor == "0.20.14"
+
+    for path in (ROOT / "pyproject.toml", ROOT / "README.md", ROOT / "install.md"):
+        assert f"dcc-mcp-core>={floor},<1.0.0" in path.read_text(encoding="utf-8")
+
+    for skill_path in sorted((ROOT / "src" / "dcc_mcp_sketchup" / "skills").glob("*/SKILL.md")):
+        assert f"dcc-mcp-core {floor}+" in skill_path.read_text(encoding="utf-8")
+
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert f'CORE_INSTALL_SOP_VERSION: "{floor}"' in workflow
+    assert "dcc-mcp-core==${CORE_INSTALL_SOP_VERSION}" in workflow
+
+
+def test_install_reports_use_the_published_core_schema_and_constants():
+    schema_resource = files("dcc_mcp_core").joinpath(
+        "schemas", "adapter-install-sop-v1.schema.json"
+    )
+    schema_bytes = schema_resource.read_bytes()
+
+    assert len(schema_bytes) == 4261
+    assert hashlib.sha256(schema_bytes).hexdigest() == (
+        "3ca25788439917b4d4c0617230a762f9797756b5b54f45c8c4149f975b90f904"
+    )
+    assert b"\r\n" not in schema_bytes
+    assert load_install_sop_schema() == json.loads(schema_bytes)
+    assert INSTALL_SOP_SCHEMA == load_install_sop_schema()
+
+    fixture_dir = ROOT / "tests" / "fixtures"
+    assert not (fixture_dir / "adapter-install-sop-v1.schema.json").exists()
+    assert not (fixture_dir / "README.md").exists()
+
+    assert install.SCHEMA_VERSION == INSTALL_SOP_SCHEMA_VERSION
+    assert (
+        install.EXIT_OK,
+        install.EXIT_PREFLIGHT,
+        install.EXIT_ACQUIRE,
+        install.EXIT_INSTALL,
+        install.EXIT_VERIFY,
+        install.EXIT_REQUIRES_RESTART,
+    ) == (
+        INSTALL_EXIT_OK,
+        INSTALL_EXIT_PREFLIGHT,
+        INSTALL_EXIT_ACQUIRE,
+        INSTALL_EXIT_INSTALL,
+        INSTALL_EXIT_VERIFY,
+        INSTALL_EXIT_REQUIRES_RESTART,
+    )
 
 
 def readiness_success(
@@ -989,8 +1050,8 @@ def test_preflight_rejects_noncanonical_adapter_versions(
 @pytest.mark.parametrize(
     "core_version",
     [
-        pytest.param("0.19.91rc1", id="prerelease"),
-        pytest.param("dcc-mcp-core 0.19.91", id="prefix"),
+        pytest.param("0.20.14rc1", id="prerelease"),
+        pytest.param("dcc-mcp-core 0.20.14", id="prefix"),
         pytest.param("0.019.91", id="zero-padded"),
         pytest.param("9" * 10_000 + ".19.91", id="bounded-before-int"),
     ],

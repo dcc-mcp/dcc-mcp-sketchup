@@ -8,7 +8,7 @@ default and uses stable exit codes: `0` success, `10` preflight, `20` acquire, `
 
 - SketchUp Desktop 2021 or newer on Windows or macOS.
 - Python 3.9 or newer containing `dcc-mcp-sketchup` and
-  `dcc-mcp-core>=0.19.91,<1.0.0`.
+  `dcc-mcp-core>=0.20.14,<1.0.0`.
 - A versioned per-user SketchUp profile created by starting the selected SketchUp version once.
 
 SketchUp Desktop is supported on Windows and macOS. Linux is not a supported SketchUp host

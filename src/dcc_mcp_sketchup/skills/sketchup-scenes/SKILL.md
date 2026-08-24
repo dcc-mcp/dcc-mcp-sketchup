@@ -5,7 +5,7 @@ description: >-
   Use for saved views, animation inclusion, organization, and entity tagging;
   use sketchup-session to discover persistent entity IDs first.
 license: MIT
-compatibility: "SketchUp 2021+; external sidecar Python 3.9+; dcc-mcp-core 0.19.91+"
+compatibility: "SketchUp 2021+; external sidecar Python 3.9+; dcc-mcp-core 0.20.14+"
 allowed-tools: Python
 metadata:
   dcc-mcp:
