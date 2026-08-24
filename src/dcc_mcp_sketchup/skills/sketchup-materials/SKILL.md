@@ -5,7 +5,7 @@ description: >-
   operations. Use for color and texture look development after entity discovery;
   use sketchup-modeling for geometry changes.
 license: MIT
-compatibility: "SketchUp 2021+; external sidecar Python 3.9+; dcc-mcp-core 0.19.91+"
+compatibility: "SketchUp 2021+; external sidecar Python 3.9+; dcc-mcp-core 0.20.14+"
 allowed-tools: Python
 metadata:
   dcc-mcp:

@@ -16,9 +16,9 @@ from dcc_mcp_core.readiness import AdapterReadinessBinder
 from dcc_mcp_core.server_base import DccServerBase
 
 from . import bridge
+from . import install as install_lifecycle
 from .__version__ import __version__
 from .dispatcher import SketchupBridgeDispatcher
-from .install import default_plugin_dir, install_extension, uninstall_extension
 
 _server: Optional["SketchupMcpServer"] = None
 
@@ -189,17 +189,16 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--bridge-port", type=int, required=True)
     serve.add_argument("--mcp-port", type=int)
 
-    install = subparsers.add_parser("install", help="Install the SketchUp Ruby extension.")
-    install.add_argument("--plugins-dir", type=Path)
-    install.add_argument("--overwrite", action="store_true")
-
-    uninstall = subparsers.add_parser("uninstall", help="Remove the SketchUp Ruby extension.")
-    uninstall.add_argument("--plugins-dir", type=Path)
+    lifecycle_help = {
+        "install": "Plan or install the SketchUp Ruby extension.",
+        "status": "Inspect the selected installation and receipt.",
+        "verify": "Verify files, interpreter import, and live readiness.",
+        "uninstall": "Plan or remove the receipted extension.",
+        "upgrade": "Plan or transactionally upgrade the extension.",
+    }
+    for verb, help_text in lifecycle_help.items():
+        subparsers.add_parser(verb, add_help=False, help=help_text)
     return parser
-
-
-def _resolve_plugins_dir(value: Optional[Path]) -> Path:
-    return value if value is not None else default_plugin_dir()
 
 
 def _run_sidecar(args: argparse.Namespace) -> None:
@@ -226,19 +225,14 @@ def _run_sidecar(args: argparse.Namespace) -> None:
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
     """Dispatch installation commands or run a host-bound sidecar."""
-    args = _build_parser().parse_args(list(argv) if argv is not None else sys.argv[1:])
-    if args.command == "install":
-        print(
-            install_extension(
-                _resolve_plugins_dir(args.plugins_dir),
-                overwrite=args.overwrite,
-            )
-        )
+    resolved = list(argv) if argv is not None else sys.argv[1:]
+    if resolved and resolved[0] in install_lifecycle.LIFECYCLE_VERBS:
+        report, code, as_json = install_lifecycle.run(resolved)
+        install_lifecycle.print_report(report, as_json)
+        if code:
+            raise SystemExit(code)
         return
-    if args.command == "uninstall":
-        removed = uninstall_extension(_resolve_plugins_dir(args.plugins_dir))
-        print("removed" if removed else "not installed")
-        return
+    args = _build_parser().parse_args(resolved)
     _run_sidecar(args)
 
 

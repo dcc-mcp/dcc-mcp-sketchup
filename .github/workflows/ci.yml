@@ -56,13 +56,15 @@ jobs:
   lint-and-build:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      CORE_INSTALL_SOP_VERSION: "0.20.14"
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.11"
       - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e ".[dev]"
+      - run: python -m pip install "dcc-mcp-core==${CORE_INSTALL_SOP_VERSION}" -e ".[dev]"
       - run: python -m ruff check src tests
       - run: python -m ruff format --check src tests
       - run: python -m build
@@ -71,5 +73,27 @@ jobs:
         shell: bash
         run: |
           python -m pip install --force-reinstall --no-deps dist/*.whl
-          python -c "import importlib.metadata as m, importlib.resources as r, dcc_mcp_sketchup as p; assert p.__version__ == m.version('dcc-mcp-sketchup'); root = r.files('dcc_mcp_sketchup'); assert root.joinpath('sketchup_plugin', 'runtime.rb').is_file(); assert root.joinpath('skills', 'sketchup-session', 'SKILL.md').is_file()"
+          python -c "import importlib.metadata as m, importlib.resources as r, dcc_mcp_sketchup as p; assert p.__version__ == m.version('dcc-mcp-sketchup'); root = r.files('dcc_mcp_sketchup'); assert root.joinpath('sketchup_plugin', 'runtime.rb').is_file(); assert root.joinpath('sketchup_plugin', 'bootstrap_errors.rb').is_file(); assert root.joinpath('skills', 'sketchup-session', 'SKILL.md').is_file()"
           python -c "import importlib.metadata as m, subprocess; expected = m.version('dcc-mcp-sketchup'); actual = subprocess.check_output(['dcc-mcp-sketchup', '--version'], text=True).strip(); assert actual == expected, (actual, expected)"
+          python -c "import importlib.metadata as m; from packaging.requirements import Requirement; from packaging.version import Version; requirement = next(Requirement(item) for item in m.requires('dcc-mcp-sketchup') if Requirement(item).name == 'dcc-mcp-core'); assert Version('0.20.14') in requirement.specifier and Version('0.20.13') not in requirement.specifier"
+          python -c "import hashlib, importlib.resources as r, json; from dcc_mcp_core.deployment import load_install_sop_schema; raw = r.files('dcc_mcp_core').joinpath('schemas', 'adapter-install-sop-v1.schema.json').read_bytes(); assert len(raw) == 4261 and hashlib.sha256(raw).hexdigest() == '3ca25788439917b4d4c0617230a762f9797756b5b54f45c8c4149f975b90f904' and b'\r\n' not in raw; assert load_install_sop_schema() == json.loads(raw)"
+      - name: Install lifecycle round trip
+        shell: bash
+        run: |
+          profile="$RUNNER_TEMP/SketchUp/SketchUp 2026/SketchUp/Plugins"
+          plan_json="$RUNNER_TEMP/sketchup-install-plan.json"
+          install_json="$RUNNER_TEMP/sketchup-install-result.json"
+          mkdir -p "$(dirname "$profile")"
+          dcc-mcp-sketchup install --plugins-dir "$profile" --json --dry-run > "$plan_json"
+          python -c "import json,sys; from jsonschema import Draft202012Validator; from dcc_mcp_core.deployment import load_install_sop_schema; p=json.load(open(sys.argv[1], encoding='utf-8')); Draft202012Validator(load_install_sop_schema()).validate(p); assert p['status']=='planned' and p['installation_state']=='fresh'" "$plan_json"
+          set +e
+          dcc-mcp-sketchup install --plugins-dir "$profile" --json --yes > "$install_json"
+          install_code=$?
+          set -e
+          test "$install_code" -eq 40
+          python -c "import json,sys; from jsonschema import Draft202012Validator; from dcc_mcp_core.deployment import load_install_sop_schema; p=json.load(open(sys.argv[1], encoding='utf-8')); Draft202012Validator(load_install_sop_schema()).validate(p); assert p['verify']['failure_stage']=='readiness' and not p['verify']['directly_usable']" "$install_json"
+          dcc-mcp-sketchup status --plugins-dir "$profile" --json
+          dcc-mcp-sketchup uninstall --plugins-dir "$profile" --json --yes
+          test ! -e "$profile/dcc_mcp_sketchup"
+          test ! -e "$profile/dcc_mcp_sketchup.rb"
+          test ! -e "$profile/.dcc-mcp/receipts/sketchup.json"

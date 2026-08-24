@@ -255,8 +255,11 @@ class CommandsTest < Minitest::Test
     result = @commands.execute('diagnostics.ping', {})
 
     assert_equal 'ok', result['status']
+    assert_equal '2026.0', result['sketchup_version']
     assert_equal 28, result['command_count']
     assert_equal Process.pid, result['host_pid']
+    assert_equal DccMcp::SketchupAdapter::Commands::ADAPTER_VERSION, result['adapter_version']
+    assert_equal File.expand_path('../../src/dcc_mcp_sketchup/sketchup_plugin', __dir__), result['plugin_path']
   end
 
   def test_add_box_uses_one_undo_operation_and_returns_persistent_id

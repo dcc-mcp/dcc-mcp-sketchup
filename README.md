@@ -55,7 +55,7 @@ calls the SketchUp API. Every model mutation is a named undoable operation.
 
 - SketchUp Desktop 2021 or newer on Windows or macOS.
 - Python 3.9 or newer for the external sidecar.
-- `dcc-mcp-core>=0.19.91,<1.0.0` (installed automatically).
+- `dcc-mcp-core>=0.20.14,<1.0.0` (installed automatically).
 
 Importer and exporter availability varies by SketchUp edition, version, and
 installed extensions. The adapter reports the host error instead of claiming a
@@ -63,35 +63,36 @@ format is available when SketchUp rejects it.
 
 ## Install
 
+See the [Install and lifecycle runbook](install.md) for the agent-first JSON contract, supported
+host versions, verification, transactional upgrade, receipt-driven uninstall, and troubleshooting.
+
 Install the package into the Python environment used by DCC-MCP:
 
 ```bash
 python -m pip install dcc-mcp-sketchup
 ```
 
-Start SketchUp once so its versioned user profile exists, then install the Ruby
-extension:
+Start SketchUp once so its versioned user profile exists, inspect the JSON plan,
+then install the Ruby extension:
 
 ```bash
-dcc-mcp-sketchup install
+dcc-mcp-sketchup install --dcc-path "C:/Program Files/SketchUp/SketchUp 2026/SketchUp.exe" --json --dry-run
+dcc-mcp-sketchup install --dcc-path "C:/Program Files/SketchUp/SketchUp 2026/SketchUp.exe" --json --yes
 ```
 
-For a specific SketchUp profile, pass its Plugins directory explicitly:
+Use `--python` when the sidecar belongs to another Python environment. The
+installer selects the versioned profile matching `--dcc-path`, writes a receipt,
+and verifies files, importability, bootstrap state, and the live host probe.
 
-```bash
-dcc-mcp-sketchup install \
-  --plugins-dir "C:/Users/you/AppData/Roaming/SketchUp/SketchUp 2026/SketchUp/Plugins"
-```
-
-Restart SketchUp. The extension binds an ephemeral loopback port, generates a
-random token, and launches the host-bound sidecar automatically. It terminates
-the sidecar when SketchUp exits.
+Open or restart SketchUp after installation. The extension binds an ephemeral
+loopback port, generates a random token, and launches the host-bound sidecar
+automatically. It terminates the sidecar when SketchUp exits.
 
 To update or remove only files owned by this package:
 
 ```bash
-dcc-mcp-sketchup install --overwrite
-dcc-mcp-sketchup uninstall
+dcc-mcp-sketchup upgrade --dcc-path "C:/Program Files/SketchUp/SketchUp 2026/SketchUp.exe" --json --yes
+dcc-mcp-sketchup uninstall --dcc-path "C:/Program Files/SketchUp/SketchUp 2026/SketchUp.exe" --json --yes
 ```
 
 ## Skills and tools
