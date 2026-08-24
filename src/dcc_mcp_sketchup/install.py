@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
+import plistlib
 import re
 import shutil
 import site
@@ -18,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
+from dcc_mcp_core import __version__ as running_core_version
 from dcc_mcp_core.install_lifecycle import (
     inspect_install_root,
     safe_remove_tree,
@@ -30,12 +33,17 @@ EXTENSION_DIRECTORY = "dcc_mcp_sketchup"
 REGISTRATION_FILENAME = "dcc_mcp_sketchup.rb"
 MIN_SKETCHUP_VERSION = 2021
 MIN_CORE_VERSION = "0.19.91"
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = 1
 RECEIPT_RELATIVE_PATH = Path(".dcc-mcp") / "receipts" / "sketchup.json"
 BOOTSTRAP_ERRORS_RELATIVE_PATH = Path(".dcc-mcp") / "logs" / "sketchup-bootstrap-errors.jsonl"
 EXIT_OK, EXIT_PREFLIGHT, EXIT_ACQUIRE = 0, 10, 20
 EXIT_INSTALL, EXIT_VERIFY, EXIT_REQUIRES_RESTART = 30, 40, 50
 _VERSION_RE = re.compile(r"SketchUp\s+(\d{4})$")
+_VERSION_COMPONENT_RE = re.compile(r"^(?:0|[1-9][0-9]{0,5})$")
+_MAX_VERSION_LENGTH = 32
+_MAX_PROBE_OUTPUT_BYTES = 4096
+_MAX_SIDECAR_BYTES = 16 * 1024 * 1024
+_MAX_WINDOWS_VERSION_RESOURCE_BYTES = 1024 * 1024
 LIFECYCLE_VERBS = ("install", "status", "verify", "uninstall", "upgrade")
 
 
@@ -82,9 +90,61 @@ def default_plugin_dir() -> Path:
     )
 
 
-def _version_tuple(value: str) -> tuple[int, ...]:
-    match = re.match(r"^(\d+(?:\.\d+)*)", value)
-    return tuple(int(part) for part in match.group(1).split(".")) if match else ()
+def _numeric_version_tuple(
+    value: object,
+    *,
+    minimum_components: int,
+    maximum_components: int,
+) -> Optional[tuple[int, ...]]:
+    if not isinstance(value, str) or not 0 < len(value) <= _MAX_VERSION_LENGTH:
+        return None
+    parts = value.split(".")
+    if not minimum_components <= len(parts) <= maximum_components:
+        return None
+    if any(_VERSION_COMPONENT_RE.fullmatch(part) is None for part in parts):
+        return None
+    return tuple(int(part) for part in parts)
+
+
+def _version_tuple(value: object) -> Optional[tuple[int, int, int]]:
+    parsed = _numeric_version_tuple(value, minimum_components=3, maximum_components=3)
+    if parsed is None:
+        return None
+    return parsed[0], parsed[1], parsed[2]
+
+
+def _run_bounded_command(command: Sequence[str], timeout: float = 10.0) -> dict[str, Any]:
+    """Run one read-only probe without retaining unbounded child output."""
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    with tempfile.TemporaryFile(mode="w+b") as stdout_file:
+        with tempfile.TemporaryFile(mode="w+b") as stderr_file:
+            try:
+                process = subprocess.Popen(
+                    list(command),
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    creationflags=creationflags,
+                )
+            except OSError as exc:
+                return {"success": False, "reason": f"launch failed: {exc.__class__.__name__}"}
+            try:
+                process.wait(timeout=max(0.1, min(float(timeout), 30.0)))
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=3)
+                return {"success": False, "reason": "probe timed out"}
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            stdout = stdout_file.read(_MAX_PROBE_OUTPUT_BYTES + 1)
+            stderr = stderr_file.read(_MAX_PROBE_OUTPUT_BYTES + 1)
+    return {
+        "success": process.returncode == 0,
+        "returncode": int(process.returncode or 0),
+        "stdout": stdout[:_MAX_PROBE_OUTPUT_BYTES].decode("utf-8", errors="replace"),
+        "stderr": stderr[:_MAX_PROBE_OUTPUT_BYTES].decode("utf-8", errors="replace"),
+        "truncated": len(stdout) > _MAX_PROBE_OUTPUT_BYTES or len(stderr) > _MAX_PROBE_OUTPUT_BYTES,
+    }
 
 
 def _resolve_python(value: Optional[Path]) -> Path:
@@ -99,58 +159,136 @@ def _resolve_python(value: Optional[Path]) -> Path:
 
 def _target_environment(python: Path) -> dict[str, str]:
     code = (
-        "import importlib.metadata as m, json, sys, sysconfig; "
-        "print(json.dumps({'python': sys.executable, "
-        "'scripts': sysconfig.get_path('scripts'), "
-        "'core_version': m.version('dcc-mcp-core'), "
-        "'adapter_version': m.version('dcc-mcp-sketchup')}))"
+        "import importlib.metadata as m, json, pathlib, sys, sysconfig; "
+        "import dcc_mcp_sketchup as p, dcc_mcp_sketchup.server as s; "
+        "d=m.distribution('dcc-mcp-sketchup'); "
+        "n='dcc-mcp-sketchup.exe' if sys.platform=='win32' else 'dcc-mcp-sketchup'; "
+        "x=(pathlib.Path(sysconfig.get_path('scripts'))/n).resolve(); "
+        "f=next((f for f in (d.files or ()) if pathlib.Path(d.locate_file(f)).resolve()==x),None); "
+        "h=f.hash if f is not None else None; "
+        "print(json.dumps({'python':sys.executable,'scripts':sysconfig.get_path('scripts'),"
+        "'core_version':m.version('dcc-mcp-core'),'adapter_version':m.version('dcc-mcp-sketchup'),"
+        "'module_version':p.__version__,'module_file':p.__file__,'server_file':s.__file__,"
+        "'launcher_path':str(x),'launcher_hash_mode':getattr(h,'mode',None),"
+        "'launcher_hash':getattr(h,'value',None)}))"
     )
-    try:
-        completed = subprocess.run(
-            [str(python), "-c", code],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise InstallFailure(
-            EXIT_PREFLIGHT,
-            "python",
-            f"cannot inspect target interpreter: {exc}",
-        ) from exc
-    if completed.returncode:
-        error_lines = completed.stderr.strip().splitlines()
+    completed = _run_bounded_command([str(python), "-c", code], timeout=15)
+    if not completed.get("success") or completed.get("truncated"):
+        error_lines = str(completed.get("stderr") or "").strip().splitlines()
         reason = error_lines[-1] if error_lines else "package metadata query failed"
         raise InstallFailure(EXIT_PREFLIGHT, "python", reason)
     try:
-        environment = json.loads(completed.stdout.strip())
+        environment = json.loads(str(completed.get("stdout") or "").strip())
     except json.JSONDecodeError as exc:
         raise InstallFailure(
             EXIT_PREFLIGHT,
             "python",
             "target interpreter returned invalid package metadata",
         ) from exc
-    if _version_tuple(str(environment["core_version"])) < _version_tuple(MIN_CORE_VERSION):
+    if not isinstance(environment, dict):
+        raise InstallFailure(
+            EXIT_PREFLIGHT,
+            "python",
+            "target interpreter returned invalid package metadata",
+        )
+    core = _version_tuple(environment.get("core_version"))
+    floor = _version_tuple(MIN_CORE_VERSION)
+    if core is None:
+        raise InstallFailure(
+            EXIT_PREFLIGHT,
+            "core",
+            "target interpreter returned a noncanonical dcc-mcp-core version",
+        )
+    if floor is None or core < floor:
         raise InstallFailure(
             EXIT_PREFLIGHT,
             "core",
             f"dcc-mcp-core {environment['core_version']} is unsupported; "
             f"version {MIN_CORE_VERSION} or newer is required",
         )
+    module_file = Path(str(environment.get("module_file") or ""))
+    server_file = Path(str(environment.get("server_file") or ""))
+    if (
+        environment.get("module_version") != __version__
+        or not module_file.is_file()
+        or not server_file.is_file()
+        or module_file.stat().st_size <= 0
+        or server_file.stat().st_size <= 0
+        or module_file.resolve().parent != server_file.resolve().parent
+    ):
+        raise InstallFailure(
+            EXIT_PREFLIGHT,
+            "python",
+            "target interpreter did not load this dcc-mcp-sketchup package",
+        )
     return {key: str(value) for key, value in environment.items()}
+
+
+def _sidecar_manifest(path: Path) -> dict[str, Any]:
+    try:
+        size = path.stat().st_size
+        if not 0 < size <= _MAX_SIDECAR_BYTES:
+            raise InstallFailure(
+                EXIT_PREFLIGHT,
+                "sidecar",
+                "dcc-mcp-sketchup executable is missing, empty, or unbounded",
+            )
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+    except OSError as exc:
+        raise InstallFailure(
+            EXIT_PREFLIGHT,
+            "sidecar",
+            "dcc-mcp-sketchup executable could not be read",
+        ) from exc
+    return {"path": str(path.resolve()), "sha256": digest.hexdigest(), "size": size}
 
 
 def _target_server_executable(environment: dict[str, str]) -> Path:
     executable_name = "dcc-mcp-sketchup.exe" if sys.platform == "win32" else "dcc-mcp-sketchup"
     executable = Path(environment["scripts"]) / executable_name
-    if not executable.is_file():
+    if (
+        not executable.is_file()
+        or Path(str(environment.get("launcher_path") or "")).resolve() != executable.resolve()
+        or environment.get("launcher_hash_mode") != "sha256"
+    ):
         raise InstallFailure(
             EXIT_PREFLIGHT,
             "sidecar",
             f"dcc-mcp-sketchup executable was not found for {environment['python']}",
         )
-    return executable.resolve()
+    executable = executable.resolve()
+    manifest = _sidecar_manifest(executable)
+    actual_hash = base64.urlsafe_b64encode(bytes.fromhex(manifest["sha256"]))
+    if actual_hash.rstrip(b"=").decode("ascii") != environment.get("launcher_hash"):
+        raise InstallFailure(
+            EXIT_PREFLIGHT,
+            "sidecar",
+            "dcc-mcp-sketchup executable bytes do not match installed package metadata",
+        )
+    probe = _run_bounded_command([str(executable), "--version"])
+    module_probe = _run_bounded_command(
+        [environment["python"], "-m", "dcc_mcp_sketchup.server", "--version"]
+    )
+    actual_version = str(probe.get("stdout") or "").strip()
+    module_version = str(module_probe.get("stdout") or "").strip()
+    if (
+        not probe.get("success")
+        or probe.get("truncated")
+        or not module_probe.get("success")
+        or module_probe.get("truncated")
+        or _version_tuple(actual_version) is None
+        or actual_version != __version__
+        or module_version != __version__
+    ):
+        raise InstallFailure(
+            EXIT_PREFLIGHT,
+            "sidecar",
+            "dcc-mcp-sketchup executable failed the bounded load/version probe",
+        )
+    return executable
 
 
 def _files_manifest(root: Path) -> list[dict[str, Any]]:
@@ -231,7 +369,10 @@ def _installation_state(
         configured_server = server_path_file.read_text(encoding="utf-8").strip()
         files = _files_manifest(target)
         registration_manifest = _registration_manifest(registration)
+        server_manifest = _sidecar_manifest(Path(configured_server))
     except OSError:
+        return "repair"
+    except InstallFailure:
         return "repair"
     if (
         not configured_server
@@ -239,6 +380,7 @@ def _installation_state(
         or Path(configured_server).resolve() != Path(str(receipt.get("server_path", ""))).resolve()
         or _manifest_digest(files) != receipt.get("extension_digest")
         or registration_manifest["sha256"] != receipt.get("registration", {}).get("sha256")
+        or server_manifest != receipt.get("server")
     ):
         return "repair"
     return "current"
@@ -285,7 +427,176 @@ def _resolve_explicit_host_path(value: Path) -> Path:
             f"SketchUp {version or 'unknown'} is unsupported; "
             f"version {MIN_SKETCHUP_VERSION} or newer is required",
         )
+    _probe_sketchup_host(host, version)
     return host
+
+
+def _probe_sketchup_host(host: Path, expected_year: int) -> str:
+    try:
+        size = host.stat().st_size
+    except OSError as exc:
+        raise InstallFailure(
+            EXIT_PREFLIGHT,
+            "host",
+            "SketchUp host metadata could not be read",
+        ) from exc
+    if size <= 0:
+        raise InstallFailure(EXIT_PREFLIGHT, "host", "SketchUp host executable is empty")
+    version = _native_host_version(host)
+    parsed = _numeric_version_tuple(version, minimum_components=1, maximum_components=4)
+    if parsed is None:
+        raise InstallFailure(
+            EXIT_PREFLIGHT,
+            "host_version",
+            "SketchUp host returned a noncanonical native version",
+        )
+    product_year = parsed[0] if parsed[0] >= 2000 else 2000 + parsed[0]
+    if product_year != expected_year:
+        raise InstallFailure(
+            EXIT_PREFLIGHT,
+            "host_version",
+            f"SketchUp native version {version} does not match the {expected_year} profile",
+        )
+    return version
+
+
+def _native_host_version(host: Path) -> str:
+    if sys.platform == "win32":
+        return _windows_file_version(host)
+    if sys.platform == "darwin":
+        return _macos_bundle_version(host)
+    raise InstallFailure(
+        EXIT_PREFLIGHT,
+        "host",
+        "SketchUp native host verification is supported only on Windows and macOS",
+    )
+
+
+def _windows_file_version(host: Path) -> str:
+    try:
+        with host.open("rb") as stream:
+            if stream.read(2) != b"MZ":
+                raise InstallFailure(
+                    EXIT_PREFLIGHT,
+                    "host",
+                    "SketchUp host is not a loadable Windows executable",
+                )
+    except OSError as exc:
+        raise InstallFailure(EXIT_PREFLIGHT, "host", "SketchUp host could not be read") from exc
+
+    import ctypes
+    from ctypes import wintypes
+
+    version_dll = ctypes.WinDLL("version", use_last_error=True)
+    version_dll.GetFileVersionInfoSizeW.argtypes = [
+        wintypes.LPCWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    version_dll.GetFileVersionInfoSizeW.restype = wintypes.DWORD
+    version_dll.GetFileVersionInfoW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+    ]
+    version_dll.GetFileVersionInfoW.restype = wintypes.BOOL
+    version_dll.VerQueryValueW.argtypes = [
+        ctypes.c_void_p,
+        wintypes.LPCWSTR,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.UINT),
+    ]
+    version_dll.VerQueryValueW.restype = wintypes.BOOL
+
+    ignored = wintypes.DWORD(0)
+    resource_size = int(version_dll.GetFileVersionInfoSizeW(str(host), ctypes.byref(ignored)))
+    if not 0 < resource_size <= _MAX_WINDOWS_VERSION_RESOURCE_BYTES:
+        raise InstallFailure(
+            EXIT_PREFLIGHT,
+            "host",
+            "SketchUp host has no bounded native version resource",
+        )
+    buffer = ctypes.create_string_buffer(resource_size)
+    if not version_dll.GetFileVersionInfoW(str(host), 0, resource_size, buffer):
+        raise InstallFailure(
+            EXIT_PREFLIGHT, "host", "SketchUp native version resource is unreadable"
+        )
+    value = ctypes.c_void_p()
+    length = wintypes.UINT(0)
+    if not version_dll.VerQueryValueW(buffer, "\\", ctypes.byref(value), ctypes.byref(length)):
+        raise InstallFailure(EXIT_PREFLIGHT, "host", "SketchUp native version resource is missing")
+
+    class FixedFileInfo(ctypes.Structure):
+        _fields_ = [
+            ("signature", wintypes.DWORD),
+            ("structure_version", wintypes.DWORD),
+            ("file_version_ms", wintypes.DWORD),
+            ("file_version_ls", wintypes.DWORD),
+            ("product_version_ms", wintypes.DWORD),
+            ("product_version_ls", wintypes.DWORD),
+        ]
+
+    if length.value < ctypes.sizeof(FixedFileInfo):
+        raise InstallFailure(
+            EXIT_PREFLIGHT, "host", "SketchUp native version resource is truncated"
+        )
+    info = ctypes.cast(value, ctypes.POINTER(FixedFileInfo)).contents
+    if info.signature != 0xFEEF04BD:
+        raise InstallFailure(EXIT_PREFLIGHT, "host", "SketchUp native version signature is invalid")
+    translation = ctypes.c_void_p()
+    translation_length = wintypes.UINT(0)
+    if (
+        not version_dll.VerQueryValueW(
+            buffer,
+            "\\VarFileInfo\\Translation",
+            ctypes.byref(translation),
+            ctypes.byref(translation_length),
+        )
+        or translation_length.value < 4
+    ):
+        raise InstallFailure(EXIT_PREFLIGHT, "host", "SketchUp product identity is missing")
+    language, code_page = ctypes.cast(
+        translation,
+        ctypes.POINTER(wintypes.WORD * 2),
+    ).contents
+    product_name = ctypes.c_void_p()
+    product_name_length = wintypes.UINT(0)
+    product_name_key = f"\\StringFileInfo\\{language:04x}{code_page:04x}\\ProductName"
+    if (
+        not version_dll.VerQueryValueW(
+            buffer,
+            product_name_key,
+            ctypes.byref(product_name),
+            ctypes.byref(product_name_length),
+        )
+        or product_name_length.value <= 1
+        or not ctypes.wstring_at(product_name).strip().lower().startswith("sketchup")
+    ):
+        raise InstallFailure(EXIT_PREFLIGHT, "host", "native executable is not SketchUp")
+    components = (
+        info.product_version_ms >> 16,
+        info.product_version_ms & 0xFFFF,
+        info.product_version_ls >> 16,
+        info.product_version_ls & 0xFFFF,
+    )
+    return ".".join(str(component) for component in components)
+
+
+def _macos_bundle_version(host: Path) -> str:
+    info_path = host.parents[2] / "Contents" / "Info.plist"
+    try:
+        with info_path.open("rb") as stream:
+            payload = plistlib.load(stream)
+    except (OSError, plistlib.InvalidFileException) as exc:
+        raise InstallFailure(
+            EXIT_PREFLIGHT,
+            "host",
+            "SketchUp application bundle metadata is unreadable",
+        ) from exc
+    product_name = str(payload.get("CFBundleName") or payload.get("CFBundleDisplayName") or "")
+    if product_name.lower() != "sketchup":
+        raise InstallFailure(EXIT_PREFLIGHT, "host", "application bundle is not SketchUp")
+    return str(payload.get("CFBundleShortVersionString") or payload.get("CFBundleVersion") or "")
 
 
 def _discover_host_for_version(version: int) -> Optional[Path]:
@@ -305,7 +616,16 @@ def _discover_host_for_version(version: int) -> Optional[Path]:
             / "MacOS"
             / "SketchUp"
         )
-    return next((path.resolve() for path in candidates if path.is_file()), None)
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        resolved = candidate.resolve()
+        try:
+            _probe_sketchup_host(resolved, version)
+        except InstallFailure:
+            continue
+        return resolved
+    return None
 
 
 def _resolve_host_and_plugins(
@@ -355,6 +675,8 @@ def plan(
     plugins_value: Optional[Path],
     python_value: Optional[Path],
     dcc_path: Optional[Path],
+    instance_id: Optional[str] = None,
+    host_pid: Optional[int] = None,
 ) -> dict[str, Any]:
     plugins_dir, host_path = _resolve_host_and_plugins(plugins_value, dcc_path)
     writable_root = plugins_dir if plugins_dir.exists() else plugins_dir.parent
@@ -366,14 +688,31 @@ def plan(
         )
     python = _resolve_python(python_value)
     environment = _target_environment(python)
-    if environment["adapter_version"] != __version__:
+    core = _version_tuple(environment.get("core_version"))
+    floor = _version_tuple(MIN_CORE_VERSION)
+    if core is None:
+        raise InstallFailure(
+            EXIT_PREFLIGHT,
+            "core",
+            "target interpreter returned a noncanonical dcc-mcp-core version",
+        )
+    if floor is None or core < floor:
+        raise InstallFailure(
+            EXIT_PREFLIGHT,
+            "core",
+            f"dcc-mcp-core {environment.get('core_version')} is unsupported; "
+            f"version {MIN_CORE_VERSION} or newer is required",
+        )
+    adapter_version = environment.get("adapter_version")
+    if _version_tuple(adapter_version) is None or adapter_version != __version__:
         raise InstallFailure(
             EXIT_PREFLIGHT,
             "python",
-            f"target interpreter has dcc-mcp-sketchup {environment['adapter_version']}; "
+            f"target interpreter has dcc-mcp-sketchup {adapter_version}; "
             f"this installer is {__version__}",
         )
     server = _target_server_executable(environment)
+    server_manifest = _sidecar_manifest(server)
     source_digest = _source_digest()
     state = _installation_state(plugins_dir, source_digest, server, python)
     return {
@@ -389,6 +728,9 @@ def plan(
         "plugins_dir": str(plugins_dir),
         "python": str(python),
         "server_path": str(server),
+        "server": server_manifest,
+        "instance_id": instance_id,
+        "host_pid": host_pid,
         "installation_state": state,
         "steps": [
             {
@@ -402,7 +744,11 @@ def plan(
         ],
         "next_steps": [],
         "receipt_path": str(plugins_dir / RECEIPT_RELATIVE_PATH),
-        "verify": None,
+        "verify": {
+            "directly_usable": False,
+            "failure_stage": None,
+            "failure_reason": None,
+        },
     }
 
 
@@ -418,6 +764,8 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--python", type=Path)
         command.add_argument("--plugins-dir", type=Path, help=argparse.SUPPRESS)
         command.add_argument("--ready-timeout", type=float, default=0.0, help=argparse.SUPPRESS)
+        command.add_argument("--instance-id", help=argparse.SUPPRESS)
+        command.add_argument("--host-pid", type=int, help=argparse.SUPPRESS)
     return parser
 
 
@@ -428,7 +776,7 @@ def _failure_result(verb: str, failure: InstallFailure) -> dict[str, Any]:
         "dcc_type": "sketchup",
         "verb": verb,
         "adapter_version": __version__,
-        "core_version": None,
+        "core_version": str(running_core_version or "unknown"),
         "steps": [{"id": failure.stage, "status": "failed", "reason": failure.reason}],
         "next_steps": [],
         "receipt_path": None,
@@ -449,7 +797,14 @@ def run(argv: Sequence[str]) -> tuple[dict[str, Any], int, bool]:
     args = _parser().parse_args(list(argv))
     mutating = args.verb in {"install", "upgrade", "uninstall"}
     try:
-        report = plan(args.verb, args.plugins_dir, args.python, args.dcc_path)
+        report = plan(
+            args.verb,
+            args.plugins_dir,
+            args.python,
+            args.dcc_path,
+            args.instance_id,
+            args.host_pid,
+        )
         if args.dry_run or (mutating and not args.yes):
             return report, EXIT_OK, args.as_json
         if args.verb in {"install", "upgrade"}:
@@ -460,7 +815,7 @@ def run(argv: Sequence[str]) -> tuple[dict[str, Any], int, bool]:
             report, code = _execute_uninstall(report)
         elif args.verb == "status":
             state = report["installation_state"]
-            report["status"] = "ok" if state in {"fresh", "current"} else state
+            report["status"] = "ok" if state in {"fresh", "current"} else "partial"
             report["steps"][-1] = {
                 "id": "status",
                 "status": report["status"],
@@ -474,6 +829,8 @@ def run(argv: Sequence[str]) -> tuple[dict[str, Any], int, bool]:
                 Path(report["plugins_dir"]),
                 Path(report["python"]),
                 max(0.0, args.ready_timeout),
+                instance_id=report.get("instance_id"),
+                host_pid=report.get("host_pid"),
             )
             report["status"] = "ok" if report["verify"]["directly_usable"] else "failed"
             code = EXIT_OK if report["status"] == "ok" else EXIT_VERIFY
@@ -527,14 +884,36 @@ def install_extension(
     executable = server_executable or _find_server_executable()
     if executable is None:
         raise RuntimeError("dcc-mcp-sketchup executable was not found in this Python environment")
+    executable = executable.expanduser().resolve()
+    if not executable.is_file() or executable.stat().st_size <= 0:
+        raise RuntimeError("dcc-mcp-sketchup executable is missing or empty")
+    probe = _run_bounded_command([str(executable), "--version"])
+    if (
+        not probe.get("success")
+        or probe.get("truncated")
+        or str(probe.get("stdout") or "").strip() != __version__
+    ):
+        raise RuntimeError("dcc-mcp-sketchup executable failed the bounded load/version probe")
 
     staging_root, staged_target, staged_registration = _stage_extension(root, executable)
+    receipt_path = root / RECEIPT_RELATIVE_PATH
+    receipt_report = {
+        "core_version": str(running_core_version),
+        "sketchup_version": str(_plugin_dir_version(root)),
+        "dcc_path": None,
+        "plugins_dir": str(root),
+        "python": str(Path(sys.executable).resolve()),
+        "server_path": str(executable),
+        "server": _sidecar_manifest(executable),
+    }
     try:
         _commit_staged_extension(
             staged_target,
             staged_registration,
             target,
             registration,
+            receipt_path=receipt_path,
+            receipt_factory=lambda: _receipt_payload(receipt_report),
         )
     finally:
         safe_remove_tree(staging_root)
@@ -580,6 +959,177 @@ def _registration_manifest(path: Path) -> dict[str, Any]:
     }
 
 
+def _is_link_or_junction(path: Path) -> bool:
+    is_junction = getattr(path, "is_junction", None)
+    return path.is_symlink() or bool(is_junction and is_junction())
+
+
+def _owned_directories(files: list[dict[str, Any]]) -> set[str]:
+    directories: set[str] = set()
+    for record in files:
+        relative = Path(str(record["path"]))
+        directories.update(parent.as_posix() for parent in relative.parents if parent != Path("."))
+    return directories
+
+
+def _validate_owned_install(
+    plugins_dir: Path,
+    receipt: dict[str, Any],
+) -> tuple[Path, Path, Path]:
+    target = plugins_dir / EXTENSION_DIRECTORY
+    registration = plugins_dir / REGISTRATION_FILENAME
+    receipt_path = plugins_dir / RECEIPT_RELATIVE_PATH
+    required_scalars = {
+        "dcc_type": "sketchup",
+        "plugins_dir": str(plugins_dir),
+        "extension_path": str(target),
+        "registration_path": str(registration),
+    }
+    if any(str(receipt.get(key, "")) != value for key, value in required_scalars.items()):
+        raise InstallFailure(
+            EXIT_PREFLIGHT,
+            "ownership",
+            "receipt ownership does not match the selected SketchUp profile",
+        )
+    if (
+        not target.is_dir()
+        or not registration.is_file()
+        or not receipt_path.is_file()
+        or any(_is_link_or_junction(path) for path in (target, registration, receipt_path))
+    ):
+        raise InstallFailure(
+            EXIT_PREFLIGHT,
+            "ownership",
+            "managed SketchUp paths are missing or use unsupported links",
+        )
+
+    expected_files = receipt.get("files")
+    if not isinstance(expected_files, list) or not expected_files:
+        raise InstallFailure(EXIT_PREFLIGHT, "ownership", "receipt file ownership is missing")
+    for record in expected_files:
+        if not isinstance(record, dict) or set(record) != {"path", "sha256", "size"}:
+            raise InstallFailure(EXIT_PREFLIGHT, "ownership", "receipt file ownership is invalid")
+        relative = Path(str(record.get("path", "")))
+        if (
+            not relative.parts
+            or relative.is_absolute()
+            or ".." in relative.parts
+            or relative.as_posix() != str(record.get("path"))
+            or not re.fullmatch(r"[0-9a-f]{64}", str(record.get("sha256", "")))
+            or not isinstance(record.get("size"), int)
+            or record["size"] < 0
+        ):
+            raise InstallFailure(EXIT_PREFLIGHT, "ownership", "receipt file ownership is invalid")
+
+    walked = list(target.rglob("*"))
+    if any(_is_link_or_junction(path) for path in walked):
+        raise InstallFailure(EXIT_PREFLIGHT, "ownership", "managed extension contains a link")
+    actual_files = _files_manifest(target)
+    actual_directories = {path.relative_to(target).as_posix() for path in walked if path.is_dir()}
+    expected_digest = receipt.get("extension_digest")
+    if (
+        actual_files != expected_files
+        or actual_directories != _owned_directories(expected_files)
+        or not isinstance(expected_digest, str)
+        or _manifest_digest(actual_files) != expected_digest
+    ):
+        raise InstallFailure(
+            EXIT_PREFLIGHT,
+            "ownership",
+            "managed extension bytes or directory ownership do not match the receipt",
+        )
+
+    expected_registration = receipt.get("registration")
+    actual_registration = _registration_manifest(registration)
+    if (
+        not isinstance(expected_registration, dict)
+        or set(expected_registration) != {"path", "sha256", "size"}
+        or actual_registration != expected_registration
+    ):
+        raise InstallFailure(
+            EXIT_PREFLIGHT,
+            "ownership",
+            "managed registration bytes do not match the receipt",
+        )
+    return target, registration, receipt_path
+
+
+def _restore_uninstall_snapshot(
+    snapshot: Path,
+    target: Path,
+    registration: Path,
+    receipt_path: Path,
+    receipt: dict[str, Any],
+) -> None:
+    snapshot_target = snapshot / EXTENSION_DIRECTORY
+    snapshot_registration = snapshot / REGISTRATION_FILENAME
+    snapshot_receipt = snapshot / "receipt.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(snapshot_target, target, dirs_exist_ok=True)
+    registration.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(snapshot_registration, registration)
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(snapshot_receipt, receipt_path)
+    _validate_owned_install(target.parent, receipt)
+
+
+def _transactional_uninstall(plugins_dir: Path, receipt: dict[str, Any]) -> None:
+    target, registration, receipt_path = _validate_owned_install(plugins_dir, receipt)
+    transaction = Path(tempfile.mkdtemp(prefix=".dcc-mcp-sketchup-uninstall-", dir=plugins_dir))
+    snapshot = transaction / "snapshot"
+    snapshot.mkdir()
+    try:
+        shutil.copytree(target, snapshot / EXTENSION_DIRECTORY)
+        shutil.copy2(registration, snapshot / REGISTRATION_FILENAME)
+        shutil.copy2(receipt_path, snapshot / "receipt.json")
+        if _files_manifest(snapshot / EXTENSION_DIRECTORY) != receipt["files"]:
+            raise InstallFailure(
+                EXIT_INSTALL, "uninstall", "uninstall snapshot verification failed"
+            )
+        if (
+            _registration_manifest(snapshot / REGISTRATION_FILENAME)["sha256"]
+            != receipt["registration"]["sha256"]
+        ):
+            raise InstallFailure(
+                EXIT_INSTALL, "uninstall", "uninstall snapshot verification failed"
+            )
+
+        try:
+            removed = safe_remove_tree(target)
+            if not removed.get("success"):
+                code = EXIT_REQUIRES_RESTART if removed.get("requires_restart") else EXIT_INSTALL
+                raise InstallFailure(
+                    code,
+                    "uninstall",
+                    removed.get("message", "failed to remove the SketchUp extension"),
+                )
+            registration.unlink()
+            receipt_path.unlink()
+        except BaseException as exc:
+            try:
+                _restore_uninstall_snapshot(
+                    snapshot,
+                    target,
+                    registration,
+                    receipt_path,
+                    receipt,
+                )
+            except BaseException as restore_error:
+                code = (
+                    EXIT_REQUIRES_RESTART
+                    if isinstance(restore_error, OSError) and _is_restart_lock_error(restore_error)
+                    else EXIT_INSTALL
+                )
+                raise InstallFailure(
+                    code,
+                    "uninstall",
+                    "uninstall failed and the prior managed installation could not be restored",
+                ) from restore_error
+            raise exc
+    finally:
+        safe_remove_tree(transaction)
+
+
 def _receipt_payload(report: dict[str, Any]) -> dict[str, Any]:
     plugins_dir = Path(report["plugins_dir"])
     target = plugins_dir / EXTENSION_DIRECTORY
@@ -595,6 +1145,7 @@ def _receipt_payload(report: dict[str, Any]) -> dict[str, Any]:
         "plugins_dir": str(plugins_dir),
         "python": report["python"],
         "server_path": report["server_path"],
+        "server": report["server"],
         "extension_path": str(target),
         "registration_path": str(registration),
         "source_digest": _source_digest(),
@@ -608,8 +1159,14 @@ def _receipt_payload(report: dict[str, Any]) -> dict[str, Any]:
 
 def _selector_arguments(report: dict[str, Any]) -> list[str]:
     if report.get("dcc_path"):
-        return ["--dcc-path", report["dcc_path"]]
-    return ["--plugins-dir", report["plugins_dir"]]
+        selector = ["--dcc-path", report["dcc_path"]]
+    else:
+        selector = ["--plugins-dir", report["plugins_dir"]]
+    if report.get("instance_id"):
+        selector.extend(["--instance-id", str(report["instance_id"])])
+    if report.get("host_pid"):
+        selector.extend(["--host-pid", str(report["host_pid"])])
+    return selector
 
 
 def _next_steps(report: dict[str, Any]) -> list[dict[str, Any]]:
@@ -702,6 +1259,9 @@ def verify_install(
     plugins_dir: Path,
     python: Path,
     timeout: float,
+    *,
+    instance_id: Optional[str] = None,
+    host_pid: Optional[int] = None,
 ) -> dict[str, Any]:
     """Verify receipt integrity, interpreter import, bootstrap, and live host readiness."""
     target = plugins_dir / EXTENSION_DIRECTORY
@@ -777,7 +1337,43 @@ def verify_install(
             ),
         )
         return result
-    result["server_path"] = {"success": True, "path": configured_server}
+    try:
+        server_manifest = _sidecar_manifest(Path(configured_server))
+    except InstallFailure as exc:
+        result.update(failure_stage="server_path", failure_reason=exc.reason)
+        return result
+    if server_manifest != receipt.get("server"):
+        result["server_path"] = {
+            "success": False,
+            "path": configured_server,
+            "expected_sha256": receipt.get("server", {}).get("sha256"),
+            "actual_sha256": server_manifest["sha256"],
+        }
+        result.update(
+            failure_stage="server_path",
+            failure_reason="installed sidecar bytes differ from the receipt; reinstall the package",
+        )
+        return result
+    executable_probe = _run_bounded_command([configured_server, "--version"])
+    module_probe = _run_bounded_command([str(python), "-m", "dcc_mcp_sketchup.server", "--version"])
+    if (
+        not executable_probe.get("success")
+        or executable_probe.get("truncated")
+        or str(executable_probe.get("stdout") or "").strip() != __version__
+        or not module_probe.get("success")
+        or module_probe.get("truncated")
+        or str(module_probe.get("stdout") or "").strip() != __version__
+    ):
+        result.update(
+            failure_stage="server_path",
+            failure_reason="installed sidecar failed the bounded load/version probe",
+        )
+        return result
+    result["server_path"] = {
+        "success": True,
+        "path": configured_server,
+        "sha256": server_manifest["sha256"],
+    }
 
     files = _files_manifest(target)
     actual_extension = _manifest_digest(files)
@@ -826,6 +1422,7 @@ def verify_install(
 
     readiness = wait_for_sidecar_ready(
         dcc_type="sketchup",
+        instance_id=instance_id,
         timeout_secs=timeout,
         probe_tool="sketchup_session__get_status",
     )
@@ -836,8 +1433,150 @@ def verify_install(
             failure_reason=readiness.get("message", "SketchUp sidecar is not ready"),
         )
         return result
+    identity_failure = _readiness_identity_failure(
+        readiness,
+        receipt,
+        plugins_dir,
+        instance_id=instance_id,
+        host_pid=host_pid,
+    )
+    if identity_failure is not None:
+        result.update(
+            failure_stage="readiness_identity",
+            failure_reason=identity_failure,
+        )
+        return result
     result["directly_usable"] = True
     return result
+
+
+def _readiness_identity_failure(
+    readiness: dict[str, Any],
+    receipt: dict[str, Any],
+    plugins_dir: Path,
+    *,
+    instance_id: Optional[str],
+    host_pid: Optional[int],
+) -> Optional[str]:
+    entry = readiness.get("entry")
+    if not isinstance(entry, dict):
+        return "ready response did not identify one SketchUp sidecar instance"
+    actual_instance = entry.get("instance_id")
+    if not isinstance(actual_instance, str) or not actual_instance.strip():
+        return "ready response omitted the SketchUp instance id"
+    if instance_id is not None and actual_instance != instance_id:
+        return "ready response belongs to a different SketchUp instance"
+
+    metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+    try:
+        entry_host_pid = int(metadata.get("dcc_pid") or metadata.get("host_pid"))
+    except (TypeError, ValueError):
+        return "ready response omitted the SketchUp host PID"
+    if entry_host_pid <= 0:
+        return "ready response reported an invalid SketchUp host PID"
+    if host_pid is not None and entry_host_pid != host_pid:
+        return "ready response belongs to a different SketchUp host PID"
+
+    expected_year = _plugin_dir_version(plugins_dir)
+    entry_version = metadata.get("dcc_version") or entry.get("version")
+    if _sketchup_product_year(entry_version) != expected_year:
+        return f"ready response does not match the selected SketchUp {expected_year} profile"
+    entry_adapter = entry.get("adapter_version") or metadata.get("adapter_version")
+    if _version_tuple(entry_adapter) is None or entry_adapter != __version__:
+        return "ready response adapter version does not match this installation"
+
+    probe = readiness.get("probe")
+    probe_result = probe.get("result") if isinstance(probe, dict) else None
+    if not isinstance(probe_result, dict):
+        return "ready response omitted the real Ruby probe result"
+    structured = probe_result.get("structuredContent")
+    if structured is None:
+        structured = probe_result.get("structured_content")
+    if not isinstance(structured, dict) or structured.get("success") is not True:
+        return "ready response omitted the real Ruby structured payload"
+    context = structured.get("context")
+    if not isinstance(context, dict) or context.get("status") != "ok":
+        return "real Ruby payload did not report status=ok"
+    try:
+        ruby_host_pid = int(context.get("host_pid"))
+    except (TypeError, ValueError):
+        return "real Ruby payload omitted the SketchUp host PID"
+    if ruby_host_pid != entry_host_pid:
+        return "real Ruby payload host PID differs from the selected sidecar instance"
+    if _sketchup_product_year(context.get("sketchup_version")) != expected_year:
+        return f"real Ruby payload does not match the selected SketchUp {expected_year} profile"
+    ruby_adapter = context.get("adapter_version")
+    if _version_tuple(ruby_adapter) is None or ruby_adapter != __version__:
+        return "real Ruby payload adapter version does not match this installation"
+    expected_plugin = (plugins_dir / EXTENSION_DIRECTORY).resolve()
+    try:
+        actual_plugin = Path(str(context.get("plugin_path") or "")).resolve()
+    except OSError:
+        return "real Ruby payload plugin path is invalid"
+    if actual_plugin != expected_plugin:
+        return "real Ruby payload came from a different SketchUp profile"
+
+    expected_host = receipt.get("dcc_path")
+    if expected_host:
+        process_path = _process_executable_path(entry_host_pid)
+        if process_path is None or process_path.resolve() != Path(str(expected_host)).resolve():
+            return "ready SketchUp host path differs from the install receipt"
+    return None
+
+
+def _sketchup_product_year(value: object) -> Optional[int]:
+    parsed = _numeric_version_tuple(value, minimum_components=1, maximum_components=4)
+    if parsed is None:
+        return None
+    return parsed[0] if parsed[0] >= 2000 else 2000 + parsed[0]
+
+
+def _process_executable_path(pid: int) -> Optional[Path]:
+    if pid <= 0:
+        return None
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return None
+        try:
+            buffer = ctypes.create_unicode_buffer(32_768)
+            length = wintypes.DWORD(len(buffer))
+            if not kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(length)):
+                return None
+            return Path(buffer.value).resolve()
+        finally:
+            kernel32.CloseHandle(handle)
+    if sys.platform == "darwin":
+        import ctypes
+
+        buffer = ctypes.create_string_buffer(4096)
+        try:
+            libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+            length = int(libproc.proc_pidpath(int(pid), buffer, len(buffer)))
+        except (OSError, AttributeError):
+            return None
+        if length <= 0:
+            return None
+        return Path(buffer.value.decode("utf-8", errors="strict")).resolve()
+    try:
+        return Path(f"/proc/{pid}/exe").resolve(strict=True)
+    except OSError:
+        return None
 
 
 def _python_import_check(python: Path) -> dict[str, Any]:
@@ -845,24 +1584,17 @@ def _python_import_check(python: Path) -> dict[str, Any]:
         "import json, dcc_mcp_sketchup; "
         "print(json.dumps({'importable': True, 'version': dcc_mcp_sketchup.__version__}))"
     )
-    try:
-        completed = subprocess.run(
-            [str(python), "-c", code],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"success": False, "reason": str(exc)}
-    if completed.returncode:
-        error_lines = completed.stderr.strip().splitlines()
+    completed = _run_bounded_command([str(python), "-c", code], timeout=15)
+    if not completed.get("success") or completed.get("truncated"):
+        error_lines = str(completed.get("stderr") or "").strip().splitlines()
         return {
             "success": False,
-            "reason": error_lines[-1] if error_lines else "adapter import failed",
+            "reason": error_lines[-1]
+            if error_lines
+            else str(completed.get("reason") or "adapter import failed"),
         }
     try:
-        payload = json.loads(completed.stdout.strip())
+        payload = json.loads(str(completed.get("stdout") or "").strip())
     except json.JSONDecodeError:
         return {"success": False, "reason": "target interpreter returned invalid output"}
     if payload.get("version") != __version__:
@@ -900,7 +1632,13 @@ def _execute_install(report: dict[str, Any], timeout: float) -> tuple[dict[str, 
         "status": "ok",
         "previous_state": state,
     }
-    report["verify"] = verify_install(plugins_dir, Path(report["python"]), timeout)
+    report["verify"] = verify_install(
+        plugins_dir,
+        Path(report["python"]),
+        timeout,
+        instance_id=report.get("instance_id"),
+        host_pid=report.get("host_pid"),
+    )
     if report["verify"]["directly_usable"]:
         report["status"] = "ok"
         return report, EXIT_OK
@@ -913,7 +1651,6 @@ def _execute_uninstall(report: dict[str, Any]) -> tuple[dict[str, Any], int]:
     plugins_dir = Path(report["plugins_dir"])
     target = plugins_dir / EXTENSION_DIRECTORY
     registration = plugins_dir / REGISTRATION_FILENAME
-    receipt_path = plugins_dir / RECEIPT_RELATIVE_PATH
     receipt = _read_receipt(plugins_dir)
     if not target.exists() and not registration.exists() and receipt is None:
         report["status"] = "ok"
@@ -925,11 +1662,7 @@ def _execute_uninstall(report: dict[str, Any]) -> tuple[dict[str, Any], int]:
             "receipt",
             "refusing to remove an unreceipted SketchUp extension; run install --yes to repair it",
         )
-    if (
-        Path(str(receipt.get("extension_path", ""))).resolve() != target.resolve()
-        or Path(str(receipt.get("registration_path", ""))).resolve() != registration.resolve()
-    ):
-        raise InstallFailure(EXIT_PREFLIGHT, "receipt", "receipt paths do not match this profile")
+    _validate_owned_install(plugins_dir, receipt)
     lock_state = inspect_install_root(target)
     if lock_state.get("requires_restart"):
         raise InstallFailure(
@@ -940,16 +1673,7 @@ def _execute_uninstall(report: dict[str, Any]) -> tuple[dict[str, Any], int]:
                 "Close SketchUp and retry the same command.",
             ),
         )
-    removed = safe_remove_tree(target)
-    if not removed.get("success"):
-        code = EXIT_REQUIRES_RESTART if removed.get("requires_restart") else EXIT_INSTALL
-        raise InstallFailure(
-            code,
-            "uninstall",
-            removed.get("message", "failed to remove the SketchUp extension"),
-        )
-    registration.unlink(missing_ok=True)
-    receipt_path.unlink(missing_ok=True)
+    _transactional_uninstall(plugins_dir, receipt)
     report["status"] = "ok"
     report["steps"][-1] = {"id": "uninstall", "status": "removed"}
     return report, EXIT_OK
@@ -1044,18 +1768,17 @@ def _commit_staged_extension(
 
 
 def uninstall_extension(plugins_dir: Path) -> bool:
-    """Remove only the two paths owned by this package."""
+    """Remove a receipt-owned extension without deleting unowned content."""
     root = plugins_dir.expanduser().resolve()
     target = root / EXTENSION_DIRECTORY
     registration = root / REGISTRATION_FILENAME
-    removed = False
-    if target.is_dir():
-        shutil.rmtree(target)
-        removed = True
-    if registration.is_file():
-        registration.unlink()
-        removed = True
-    return removed
+    receipt = _read_receipt(root)
+    if not target.exists() and not registration.exists() and receipt is None:
+        return False
+    if receipt is None:
+        raise RuntimeError("refusing to remove an unreceipted SketchUp extension")
+    _transactional_uninstall(root, receipt)
+    return True
 
 
 def _plugin_dir_version(path: Path) -> int:

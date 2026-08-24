@@ -7,6 +7,7 @@ module DccMcp
     class Commands
       MAX_LIST_ITEMS = 500
       MAX_OPTION_KEYS = 64
+      ADAPTER_VERSION = '0.1.0' # x-release-please-version
       OPTION_KEY_PATTERN = /\A[a-z][a-z0-9_]{0,63}\z/.freeze
       IMPORT_EXTENSIONS = %w[.3ds .dae .dwg .dxf .ifc .kmz .obj .skp .stl].freeze
       EXPORT_EXTENSIONS = %w[.3ds .dae .dwg .dxf .fbx .glb .ifc .kmz .obj .pdf .usdz .wrl .xsi].freeze
@@ -71,6 +72,8 @@ module DccMcp
           'status' => 'ok',
           'sketchup_version' => Sketchup.version.to_s,
           'host_pid' => Process.pid,
+          'adapter_version' => ADAPTER_VERSION,
+          'plugin_path' => File.expand_path(__dir__),
           'host_thread_id' => Thread.current.object_id,
           'command_count' => @commands.length,
           'model_valid' => model.valid?

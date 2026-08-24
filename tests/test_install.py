@@ -1,15 +1,119 @@
+import json
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from dcc_mcp_sketchup import install
 from dcc_mcp_sketchup import server as server_module
 
+ROOT = Path(__file__).parents[1]
+INSTALL_SOP_SCHEMA = json.loads(
+    (ROOT / "tests" / "fixtures" / "adapter-install-sop-v1.schema.json").read_text(encoding="utf-8")
+)
+INSTALL_SOP_VALIDATOR = Draft202012Validator(INSTALL_SOP_SCHEMA)
+Draft202012Validator.check_schema(INSTALL_SOP_SCHEMA)
+
+
+def readiness_success(
+    plugins_dir: Path,
+    *,
+    year: int = 2026,
+    host_pid: int = 4242,
+    instance_id: str = "sketchup-2026-4242",
+) -> dict:
+    version = f"{year}.0.0"
+    return {
+        "success": True,
+        "status": "ready",
+        "entry": {
+            "instance_id": instance_id,
+            "adapter_version": install.__version__,
+            "version": version,
+            "metadata": {
+                "dcc_pid": host_pid,
+                "dcc_version": version,
+            },
+        },
+        "probe": {
+            "success": True,
+            "result": {
+                "structuredContent": {
+                    "success": True,
+                    "context": {
+                        "status": "ok",
+                        "sketchup_version": version,
+                        "host_pid": host_pid,
+                        "adapter_version": install.__version__,
+                        "plugin_path": str((plugins_dir / install.EXTENSION_DIRECTORY).resolve()),
+                    },
+                }
+            },
+        },
+    }
+
+
+def installed_bytes(plugins_dir: Path) -> dict[str, bytes]:
+    owned_paths = (
+        plugins_dir / install.EXTENSION_DIRECTORY,
+        plugins_dir / install.REGISTRATION_FILENAME,
+        plugins_dir / install.RECEIPT_RELATIVE_PATH,
+    )
+    snapshot: dict[str, bytes] = {}
+    for owned_path in owned_paths:
+        if owned_path.is_dir():
+            for path in sorted(item for item in owned_path.rglob("*") if item.is_file()):
+                snapshot[path.relative_to(plugins_dir).as_posix()] = path.read_bytes()
+        elif owned_path.is_file():
+            snapshot[owned_path.relative_to(plugins_dir).as_posix()] = owned_path.read_bytes()
+    return snapshot
+
+
+def fake_server_executable(tmp_path: Path, monkeypatch) -> Path:
+    executable = tmp_path / "dcc-mcp-sketchup.exe"
+    executable.write_bytes(b"bounded test launcher")
+    monkeypatch.setattr(install, "_find_server_executable", lambda: executable)
+    monkeypatch.setattr(
+        install,
+        "_run_bounded_command",
+        lambda _command, **_kwargs: {
+            "success": True,
+            "stdout": install.__version__,
+            "stderr": "",
+            "truncated": False,
+        },
+    )
+    return executable
+
+
+@pytest.mark.parametrize("verb", install.LIFECYCLE_VERBS)
+def test_every_public_lifecycle_plan_matches_the_core_draft_schema(tmp_path, verb):
+    plugins_dir = tmp_path / "SketchUp" / "SketchUp 2026" / "SketchUp" / "Plugins"
+    plugins_dir.parent.mkdir(parents=True)
+
+    report, code, as_json = install.run(
+        [verb, "--plugins-dir", str(plugins_dir), "--json", "--dry-run"]
+    )
+
+    assert code == install.EXIT_OK
+    assert as_json is True
+    INSTALL_SOP_VALIDATOR.validate(report)
+
+
+def test_public_preflight_failure_matches_the_core_draft_schema(tmp_path):
+    unavailable = tmp_path / "SketchUp" / "SketchUp 2026" / "SketchUp" / "Plugins"
+
+    report, code, as_json = install.run(
+        ["install", "--plugins-dir", str(unavailable), "--json", "--dry-run"]
+    )
+
+    assert code == install.EXIT_PREFLIGHT
+    assert as_json is True
+    INSTALL_SOP_VALIDATOR.validate(report)
+
 
 def test_install_and_uninstall_copy_only_owned_extension(tmp_path, monkeypatch):
-    executable = tmp_path / "dcc-mcp-sketchup.exe"
-    executable.touch()
-    monkeypatch.setattr(install, "_find_server_executable", lambda: executable)
+    executable = fake_server_executable(tmp_path, monkeypatch)
     plugins_dir = tmp_path / "Plugins"
 
     target = install.install_extension(plugins_dir)
@@ -29,9 +133,7 @@ def test_install_and_uninstall_copy_only_owned_extension(tmp_path, monkeypatch):
 
 
 def test_install_refuses_existing_extension_without_overwrite(tmp_path, monkeypatch):
-    executable = tmp_path / "dcc-mcp-sketchup.exe"
-    executable.touch()
-    monkeypatch.setattr(install, "_find_server_executable", lambda: executable)
+    fake_server_executable(tmp_path, monkeypatch)
     plugins_dir = tmp_path / "Plugins"
     install.install_extension(plugins_dir)
 
@@ -48,9 +150,7 @@ def test_overwrite_failure_preserves_the_previous_extension(tmp_path, monkeypatc
     registration = plugins_dir / "dcc_mcp_sketchup.rb"
     registration.write_text("previous registration", encoding="utf-8")
 
-    executable = tmp_path / "dcc-mcp-sketchup.exe"
-    executable.touch()
-    monkeypatch.setattr(install, "_find_server_executable", lambda: executable)
+    fake_server_executable(tmp_path, monkeypatch)
     monkeypatch.setattr(
         install.shutil,
         "copytree",
@@ -74,7 +174,7 @@ def test_standard_install_dry_run_is_machine_readable_and_does_not_write(tmp_pat
 
     assert code == install.EXIT_OK
     assert as_json is True
-    assert report["schema_version"] == "1"
+    assert report["schema_version"] == 1
     assert report["status"] == "planned"
     assert report["dcc_type"] == "sketchup"
     assert report["sketchup_version"] == "2026"
@@ -95,7 +195,7 @@ def test_install_status_and_uninstall_round_trip(tmp_path, monkeypatch):
     monkeypatch.setattr(
         install,
         "verify_install",
-        lambda *_args: {
+        lambda *_args, **_kwargs: {
             "directly_usable": True,
             "failure_stage": None,
             "failure_reason": None,
@@ -114,6 +214,8 @@ def test_install_status_and_uninstall_round_trip(tmp_path, monkeypatch):
     assert installed["verify"]["directly_usable"] is True
     assert status["installation_state"] == "current"
     assert removed["status"] == "ok"
+    for result in (installed, status, removed):
+        INSTALL_SOP_VALIDATOR.validate(result)
     assert not (plugins_dir / install.EXTENSION_DIRECTORY).exists()
     assert not (plugins_dir / install.REGISTRATION_FILENAME).exists()
     assert not (plugins_dir / install.RECEIPT_RELATIVE_PATH).exists()
@@ -152,13 +254,108 @@ def test_uninstall_refuses_an_unreceipted_extension(tmp_path):
     assert registration.read_text(encoding="utf-8") == "user-owned"
 
 
+@pytest.mark.parametrize("tamper_target", ["unexpected-file", "registration"])
+def test_uninstall_refuses_tampered_or_unowned_content(tmp_path, tamper_target):
+    plugins_dir = tmp_path / "SketchUp" / "SketchUp 2026" / "SketchUp" / "Plugins"
+    plugins_dir.parent.mkdir(parents=True)
+    install._install_from_report(install.plan("install", plugins_dir, None, None))
+    if tamper_target == "unexpected-file":
+        unexpected = plugins_dir / install.EXTENSION_DIRECTORY / "operator-data.txt"
+        unexpected.write_text("must survive", encoding="utf-8")
+    else:
+        registration = plugins_dir / install.REGISTRATION_FILENAME
+        registration.write_text("operator replacement", encoding="utf-8")
+    before = installed_bytes(plugins_dir)
+
+    report, code, _ = install.run(
+        ["uninstall", "--plugins-dir", str(plugins_dir), "--json", "--yes"]
+    )
+
+    assert code == install.EXIT_PREFLIGHT
+    assert report["verify"]["failure_stage"] == "ownership"
+    assert installed_bytes(plugins_dir) == before
+
+
+@pytest.mark.parametrize(
+    ("failure_target", "error_type", "expected_code"),
+    [
+        ("registration", PermissionError, install.EXIT_REQUIRES_RESTART),
+        ("receipt", OSError, install.EXIT_INSTALL),
+    ],
+)
+def test_uninstall_delete_failure_restores_the_complete_prior_state(
+    tmp_path,
+    monkeypatch,
+    failure_target,
+    error_type,
+    expected_code,
+):
+    plugins_dir = tmp_path / "SketchUp" / "SketchUp 2026" / "SketchUp" / "Plugins"
+    plugins_dir.parent.mkdir(parents=True)
+    install._install_from_report(install.plan("install", plugins_dir, None, None))
+    before = installed_bytes(plugins_dir)
+    registration = (plugins_dir / install.REGISTRATION_FILENAME).resolve()
+    receipt_path = (plugins_dir / install.RECEIPT_RELATIVE_PATH).resolve()
+    failing_path = registration if failure_target == "registration" else receipt_path
+    real_unlink = Path.unlink
+
+    def fail_selected_unlink(path, *args, **kwargs):
+        if path.resolve() == failing_path:
+            raise error_type(f"injected {failure_target} delete failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_selected_unlink)
+
+    report, code, _ = install.run(
+        ["uninstall", "--plugins-dir", str(plugins_dir), "--json", "--yes"]
+    )
+
+    assert code == expected_code
+    assert report["verify"]["failure_stage"] == "uninstall"
+    assert installed_bytes(plugins_dir) == before
+    INSTALL_SOP_VALIDATOR.validate(report)
+
+
+def test_uninstall_partial_directory_delete_failure_restores_every_owned_byte(
+    tmp_path,
+    monkeypatch,
+):
+    plugins_dir = tmp_path / "SketchUp" / "SketchUp 2026" / "SketchUp" / "Plugins"
+    plugins_dir.parent.mkdir(parents=True)
+    install._install_from_report(install.plan("install", plugins_dir, None, None))
+    target = (plugins_dir / install.EXTENSION_DIRECTORY).resolve()
+    before = installed_bytes(plugins_dir)
+    real_safe_remove_tree = install.safe_remove_tree
+
+    def partially_remove_selected_tree(path):
+        if Path(path).resolve() == target:
+            next(item for item in target.rglob("*") if item.is_file()).unlink()
+            return {
+                "success": False,
+                "requires_restart": False,
+                "message": "injected partial directory deletion",
+            }
+        return real_safe_remove_tree(path)
+
+    monkeypatch.setattr(install, "safe_remove_tree", partially_remove_selected_tree)
+
+    report, code, _ = install.run(
+        ["uninstall", "--plugins-dir", str(plugins_dir), "--json", "--yes"]
+    )
+
+    assert code == install.EXIT_INSTALL
+    assert report["verify"]["failure_stage"] == "uninstall"
+    assert installed_bytes(plugins_dir) == before
+    INSTALL_SOP_VALIDATOR.validate(report)
+
+
 def test_receipt_failure_rolls_back_extension_registration_and_receipt(tmp_path, monkeypatch):
     plugins_dir = tmp_path / "SketchUp" / "SketchUp 2026" / "SketchUp" / "Plugins"
     plugins_dir.parent.mkdir(parents=True)
     monkeypatch.setattr(
         install,
         "verify_install",
-        lambda *_args: {
+        lambda *_args, **_kwargs: {
             "directly_usable": True,
             "failure_stage": None,
             "failure_reason": None,
@@ -189,6 +386,7 @@ def test_receipt_failure_rolls_back_extension_registration_and_receipt(tmp_path,
 
     assert upgrade_code == install.EXIT_INSTALL
     assert "receipt write failed" in report["verify"]["failure_reason"]
+    INSTALL_SOP_VALIDATOR.validate(report)
     assert marker.read_text(encoding="utf-8") == "previous extension"
     assert registration.read_text(encoding="utf-8") == "previous registration"
     assert receipt_path.read_bytes() == old_receipt
@@ -213,6 +411,55 @@ def test_verify_diagnoses_the_exact_stale_server_path(tmp_path):
     assert "upgrade --yes" in verification["failure_reason"]
 
 
+def test_verify_rejects_a_receipted_but_unloadable_sidecar(tmp_path, monkeypatch):
+    plugins_dir = tmp_path / "SketchUp" / "SketchUp 2026" / "SketchUp" / "Plugins"
+    plugins_dir.parent.mkdir(parents=True)
+    fake_server = tmp_path / "dcc-mcp-sketchup.exe"
+    fake_server.write_bytes(b"arbitrary executable bytes")
+    report = install.plan("install", plugins_dir, None, None)
+    report["server_path"] = str(fake_server.resolve())
+    report["server"] = install._sidecar_manifest(fake_server)
+    install._install_from_report(report)
+    monkeypatch.setattr(
+        install,
+        "_python_import_check",
+        lambda _python: (_ for _ in ()).throw(
+            AssertionError("unloadable sidecar must fail before import/readiness")
+        ),
+    )
+
+    verification = install.verify_install(plugins_dir, Path(report["python"]), 0.0)
+
+    assert verification["directly_usable"] is False
+    assert verification["failure_stage"] == "server_path"
+    assert "load/version" in verification["failure_reason"]
+
+
+def test_verify_rejects_sidecar_bytes_tampered_after_receipt(tmp_path, monkeypatch):
+    plugins_dir = tmp_path / "SketchUp" / "SketchUp 2026" / "SketchUp" / "Plugins"
+    plugins_dir.parent.mkdir(parents=True)
+    report = install.plan("install", plugins_dir, None, None)
+    copied_server = tmp_path / Path(report["server_path"]).name
+    copied_server.write_bytes(Path(report["server_path"]).read_bytes())
+    report["server_path"] = str(copied_server.resolve())
+    report["server"] = install._sidecar_manifest(copied_server)
+    install._install_from_report(report)
+    copied_server.write_bytes(copied_server.read_bytes() + b"tampered")
+    monkeypatch.setattr(
+        install,
+        "_python_import_check",
+        lambda _python: (_ for _ in ()).throw(
+            AssertionError("tampered sidecar must fail before import/readiness")
+        ),
+    )
+
+    verification = install.verify_install(plugins_dir, Path(report["python"]), 0.0)
+
+    assert verification["directly_usable"] is False
+    assert verification["failure_stage"] == "server_path"
+    assert "differ" in verification["failure_reason"]
+
+
 def test_dcc_path_selects_the_matching_versioned_profile(tmp_path, monkeypatch):
     profiles = []
     for version in (2024, 2026):
@@ -221,8 +468,9 @@ def test_dcc_path_selects_the_matching_versioned_profile(tmp_path, monkeypatch):
         profiles.append(profile)
     host = tmp_path / "Program Files" / "SketchUp" / "SketchUp 2024" / "SketchUp.exe"
     host.parent.mkdir(parents=True)
-    host.touch()
+    host.write_bytes(b"MZ" + b"\0" * 512)
     monkeypatch.setattr(install, "discover_plugin_dirs", lambda: list(reversed(profiles)))
+    monkeypatch.setattr(install, "_native_host_version", lambda _path: "2024.0.0")
 
     report, code, _ = install.run(["install", "--dcc-path", str(host), "--json", "--dry-run"])
 
@@ -244,8 +492,9 @@ def test_status_marks_a_stale_server_path_as_repair(tmp_path):
     report, code, _ = install.run(["status", "--plugins-dir", str(plugins_dir), "--json"])
 
     assert code == install.EXIT_VERIFY
-    assert report["status"] == "repair"
+    assert report["status"] == "partial"
     assert report["installation_state"] == "repair"
+    INSTALL_SOP_VALIDATOR.validate(report)
 
 
 def test_loaded_install_root_uses_the_restart_exit_contract(tmp_path, monkeypatch):
@@ -265,6 +514,7 @@ def test_loaded_install_root_uses_the_restart_exit_contract(tmp_path, monkeypatc
     assert code == install.EXIT_REQUIRES_RESTART
     assert report["status"] == "requires_restart"
     assert report["verify"]["failure_reason"] == "Close SketchUp and retry the same command."
+    INSTALL_SOP_VALIDATOR.validate(report)
 
 
 def test_standard_entry_point_dispatches_status_json(tmp_path, capsys):
@@ -274,7 +524,7 @@ def test_standard_entry_point_dispatches_status_json(tmp_path, capsys):
     server_module.main(["status", "--plugins-dir", str(plugins_dir), "--json"])
 
     payload = install.json.loads(capsys.readouterr().out)
-    assert payload["schema_version"] == "1"
+    assert payload["schema_version"] == 1
     assert payload["verb"] == "status"
     assert payload["status"] == "ok"
     assert payload["installation_state"] == "fresh"
@@ -317,6 +567,7 @@ def test_verify_requires_a_real_host_probe_and_emits_executable_recovery(tmp_pat
     assert probe["probe_tool"] == "sketchup_session__get_status"
     assert report["next_steps"]
     assert all("command" in step or "file_edit" in step for step in report["next_steps"])
+    INSTALL_SOP_VALIDATOR.validate(report)
 
 
 def test_verify_reports_usable_only_after_the_live_probe_succeeds(tmp_path, monkeypatch):
@@ -332,7 +583,7 @@ def test_verify_reports_usable_only_after_the_live_probe_succeeds(tmp_path, monk
     monkeypatch.setattr(
         install,
         "wait_for_sidecar_ready",
-        lambda **_kwargs: {"success": True, "status": "ready", "probe": {"success": True}},
+        lambda **_kwargs: readiness_success(plugins_dir),
     )
 
     verification = install.verify_install(plugins_dir, Path(report["python"]), 0.0)
@@ -342,6 +593,164 @@ def test_verify_reports_usable_only_after_the_live_probe_succeeds(tmp_path, monk
     assert verification["artifact"]["success"] is True
     assert verification["import"]["success"] is True
     assert verification["readiness"]["success"] is True
+
+
+def test_verify_rejects_a_foreign_2024_instance_for_the_2026_profile(tmp_path, monkeypatch):
+    plugins_dir = tmp_path / "SketchUp" / "SketchUp 2026" / "SketchUp" / "Plugins"
+    plugins_dir.parent.mkdir(parents=True)
+    report = install.plan("install", plugins_dir, None, None)
+    install._install_from_report(report)
+    monkeypatch.setattr(
+        install,
+        "_python_import_check",
+        lambda _python: {"success": True, "importable": True, "version": install.__version__},
+    )
+    monkeypatch.setattr(
+        install,
+        "wait_for_sidecar_ready",
+        lambda **_kwargs: readiness_success(
+            plugins_dir,
+            year=2024,
+            host_pid=2424,
+            instance_id="foreign-2024",
+        ),
+    )
+
+    verification = install.verify_install(
+        plugins_dir,
+        Path(report["python"]),
+        0.0,
+        instance_id="foreign-2024",
+        host_pid=2424,
+    )
+
+    assert verification["directly_usable"] is False
+    assert verification["failure_stage"] == "readiness_identity"
+    assert "2026" in verification["failure_reason"]
+
+
+@pytest.mark.parametrize("version", ["2026.0rc1", "9" * 10_000 + ".0"])
+def test_verify_rejects_noncanonical_or_unbounded_readiness_versions(
+    tmp_path,
+    monkeypatch,
+    version,
+):
+    plugins_dir = tmp_path / "SketchUp" / "SketchUp 2026" / "SketchUp" / "Plugins"
+    plugins_dir.parent.mkdir(parents=True)
+    report = install.plan("install", plugins_dir, None, None)
+    install._install_from_report(report)
+    monkeypatch.setattr(
+        install,
+        "_python_import_check",
+        lambda _python: {"success": True, "importable": True, "version": install.__version__},
+    )
+    readiness = readiness_success(plugins_dir)
+    readiness["entry"]["version"] = version
+    readiness["entry"]["metadata"]["dcc_version"] = version
+    readiness["probe"]["result"]["structuredContent"]["context"]["sketchup_version"] = version
+    monkeypatch.setattr(install, "wait_for_sidecar_ready", lambda **_kwargs: readiness)
+
+    verification = install.verify_install(plugins_dir, Path(report["python"]), 0.0)
+
+    assert verification["directly_usable"] is False
+    assert verification["failure_stage"] == "readiness_identity"
+
+
+@pytest.mark.parametrize(
+    ("entry_instance", "entry_pid", "expected_fragment"),
+    [
+        ("other-instance", 4242, "instance"),
+        ("sketchup-2026-4242", 9999, "PID"),
+    ],
+)
+def test_verify_rejects_readiness_that_does_not_match_selected_identity(
+    tmp_path,
+    monkeypatch,
+    entry_instance,
+    entry_pid,
+    expected_fragment,
+):
+    plugins_dir = tmp_path / "SketchUp" / "SketchUp 2026" / "SketchUp" / "Plugins"
+    plugins_dir.parent.mkdir(parents=True)
+    report = install.plan("install", plugins_dir, None, None)
+    install._install_from_report(report)
+    monkeypatch.setattr(
+        install,
+        "_python_import_check",
+        lambda _python: {"success": True, "importable": True, "version": install.__version__},
+    )
+    readiness = readiness_success(
+        plugins_dir,
+        host_pid=entry_pid,
+        instance_id=entry_instance,
+    )
+    monkeypatch.setattr(install, "wait_for_sidecar_ready", lambda **_kwargs: readiness)
+
+    verification = install.verify_install(
+        plugins_dir,
+        Path(report["python"]),
+        0.0,
+        instance_id="sketchup-2026-4242",
+        host_pid=4242,
+    )
+
+    assert verification["directly_usable"] is False
+    assert verification["failure_stage"] == "readiness_identity"
+    assert expected_fragment.lower() in verification["failure_reason"].lower()
+
+
+def test_verify_rejects_a_host_process_path_outside_the_receipt(tmp_path, monkeypatch):
+    plugins_dir = tmp_path / "SketchUp" / "SketchUp 2026" / "SketchUp" / "Plugins"
+    plugins_dir.parent.mkdir(parents=True)
+    report = install.plan("install", plugins_dir, None, None)
+    install._install_from_report(report)
+    receipt_path = plugins_dir / install.RECEIPT_RELATIVE_PATH
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    expected_host = tmp_path / "SketchUp 2026" / "SketchUp.exe"
+    receipt["dcc_path"] = str(expected_host.resolve())
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    monkeypatch.setattr(
+        install,
+        "_python_import_check",
+        lambda _python: {"success": True, "importable": True, "version": install.__version__},
+    )
+    monkeypatch.setattr(
+        install,
+        "wait_for_sidecar_ready",
+        lambda **_kwargs: readiness_success(plugins_dir),
+    )
+    monkeypatch.setattr(
+        install,
+        "_process_executable_path",
+        lambda _pid: tmp_path / "SketchUp 2024" / "SketchUp.exe",
+    )
+
+    verification = install.verify_install(plugins_dir, Path(report["python"]), 0.0)
+
+    assert verification["directly_usable"] is False
+    assert verification["failure_stage"] == "readiness_identity"
+    assert "host path" in verification["failure_reason"]
+
+
+def test_verify_rejects_success_without_the_real_ruby_payload(tmp_path, monkeypatch):
+    plugins_dir = tmp_path / "SketchUp" / "SketchUp 2026" / "SketchUp" / "Plugins"
+    plugins_dir.parent.mkdir(parents=True)
+    report = install.plan("install", plugins_dir, None, None)
+    install._install_from_report(report)
+    monkeypatch.setattr(
+        install,
+        "_python_import_check",
+        lambda _python: {"success": True, "importable": True, "version": install.__version__},
+    )
+    readiness = readiness_success(plugins_dir)
+    readiness["probe"]["result"].pop("structuredContent")
+    monkeypatch.setattr(install, "wait_for_sidecar_ready", lambda **_kwargs: readiness)
+
+    verification = install.verify_install(plugins_dir, Path(report["python"]), 0.0)
+
+    assert verification["directly_usable"] is False
+    assert verification["failure_stage"] == "readiness_identity"
+    assert "Ruby" in verification["failure_reason"]
 
 
 def test_locked_backup_move_preserves_install_and_returns_restart(tmp_path, monkeypatch):
@@ -395,6 +804,184 @@ def test_preflight_rejects_a_different_adapter_in_target_python(tmp_path, monkey
     assert report["verify"]["failure_stage"] == "python"
     assert "0.0.1" in report["verify"]["failure_reason"]
     assert install.__version__ in report["verify"]["failure_reason"]
+
+
+@pytest.mark.parametrize(
+    "adapter_version",
+    [
+        pytest.param("0.1.0rc1", id="prerelease"),
+        pytest.param("dcc-mcp-sketchup 0.1.0", id="garbage-prefix"),
+        pytest.param("0.01.0", id="zero-padded"),
+        pytest.param("9" * 10_000 + ".1.0", id="bounded-before-int"),
+    ],
+)
+def test_preflight_rejects_noncanonical_adapter_versions(
+    tmp_path,
+    monkeypatch,
+    adapter_version,
+):
+    plugins_dir = tmp_path / "SketchUp" / "SketchUp 2026" / "SketchUp" / "Plugins"
+    plugins_dir.parent.mkdir(parents=True)
+    monkeypatch.setattr(
+        install,
+        "_target_environment",
+        lambda python: {
+            "python": str(python),
+            "scripts": str(tmp_path / "Scripts"),
+            "core_version": install.MIN_CORE_VERSION,
+            "adapter_version": adapter_version,
+        },
+    )
+
+    report, code, _ = install.run(
+        ["install", "--plugins-dir", str(plugins_dir), "--json", "--dry-run"]
+    )
+
+    assert code == install.EXIT_PREFLIGHT
+    assert report["verify"]["failure_stage"] == "python"
+
+
+@pytest.mark.parametrize(
+    "core_version",
+    [
+        pytest.param("0.19.91rc1", id="prerelease"),
+        pytest.param("dcc-mcp-core 0.19.91", id="prefix"),
+        pytest.param("0.019.91", id="zero-padded"),
+        pytest.param("9" * 10_000 + ".19.91", id="bounded-before-int"),
+    ],
+)
+def test_preflight_rejects_noncanonical_core_versions(tmp_path, monkeypatch, core_version):
+    plugins_dir = tmp_path / "SketchUp" / "SketchUp 2026" / "SketchUp" / "Plugins"
+    plugins_dir.parent.mkdir(parents=True)
+    scripts = tmp_path / "Scripts"
+    scripts.mkdir()
+    executable_name = (
+        "dcc-mcp-sketchup.exe" if install.sys.platform == "win32" else "dcc-mcp-sketchup"
+    )
+    (scripts / executable_name).write_bytes(b"placeholder")
+    monkeypatch.setattr(
+        install,
+        "_target_environment",
+        lambda python: {
+            "python": str(python),
+            "scripts": str(scripts),
+            "core_version": core_version,
+            "adapter_version": install.__version__,
+        },
+    )
+
+    report, code, _ = install.run(
+        ["install", "--plugins-dir", str(plugins_dir), "--json", "--dry-run"]
+    )
+
+    assert code == install.EXIT_PREFLIGHT
+    assert report["verify"]["failure_stage"] == "core"
+
+
+@pytest.mark.parametrize("content", [b"", b"not a loadable sidecar"])
+def test_preflight_rejects_zero_or_arbitrary_sidecar_files(tmp_path, monkeypatch, content):
+    plugins_dir = tmp_path / "SketchUp" / "SketchUp 2026" / "SketchUp" / "Plugins"
+    plugins_dir.parent.mkdir(parents=True)
+    scripts = tmp_path / "Scripts"
+    scripts.mkdir()
+    executable_name = (
+        "dcc-mcp-sketchup.exe" if install.sys.platform == "win32" else "dcc-mcp-sketchup"
+    )
+    (scripts / executable_name).write_bytes(content)
+    monkeypatch.setattr(
+        install,
+        "_target_environment",
+        lambda python: {
+            "python": str(python),
+            "scripts": str(scripts),
+            "core_version": install.MIN_CORE_VERSION,
+            "adapter_version": install.__version__,
+        },
+    )
+
+    report, code, _ = install.run(
+        ["install", "--plugins-dir", str(plugins_dir), "--json", "--dry-run"]
+    )
+
+    assert code == install.EXIT_PREFLIGHT
+    assert report["verify"]["failure_stage"] == "sidecar"
+    assert report["verify"]["directly_usable"] is False
+
+
+def test_preflight_rejects_a_fake_version_launcher_outside_distribution_ownership(
+    tmp_path,
+    monkeypatch,
+):
+    plugins_dir = tmp_path / "SketchUp" / "SketchUp 2026" / "SketchUp" / "Plugins"
+    plugins_dir.parent.mkdir(parents=True)
+    scripts = tmp_path / "Scripts"
+    scripts.mkdir()
+    executable_name = (
+        "dcc-mcp-sketchup.exe" if install.sys.platform == "win32" else "dcc-mcp-sketchup"
+    )
+    executable = scripts / executable_name
+    executable.write_bytes(b"fake launcher that claims the current version")
+    monkeypatch.setattr(
+        install,
+        "_target_environment",
+        lambda python: {
+            "python": str(python),
+            "scripts": str(scripts),
+            "core_version": install.MIN_CORE_VERSION,
+            "adapter_version": install.__version__,
+            "launcher_path": str(executable),
+            "launcher_hash_mode": "sha256",
+            "launcher_hash": "forged-record-digest",
+        },
+    )
+    monkeypatch.setattr(
+        install,
+        "_run_bounded_command",
+        lambda *_args, **_kwargs: {
+            "success": True,
+            "stdout": install.__version__,
+            "stderr": "",
+            "truncated": False,
+        },
+    )
+
+    report, code, _ = install.run(
+        ["install", "--plugins-dir", str(plugins_dir), "--json", "--dry-run"]
+    )
+
+    assert code == install.EXIT_PREFLIGHT
+    assert report["verify"]["failure_stage"] == "sidecar"
+    assert "metadata" in report["verify"]["failure_reason"]
+
+
+@pytest.mark.parametrize("content", [b"", b"not a native SketchUp executable"])
+def test_dcc_path_rejects_zero_or_arbitrary_host_files(tmp_path, monkeypatch, content):
+    profile = tmp_path / "profiles" / "SketchUp 2026" / "SketchUp" / "Plugins"
+    profile.parent.mkdir(parents=True)
+    host = tmp_path / "Program Files" / "SketchUp" / "SketchUp 2026" / "SketchUp.exe"
+    host.parent.mkdir(parents=True)
+    host.write_bytes(content)
+    monkeypatch.setattr(install, "discover_plugin_dirs", lambda: [profile])
+
+    report, code, _ = install.run(["install", "--dcc-path", str(host), "--json", "--dry-run"])
+
+    assert code == install.EXIT_PREFLIGHT
+    assert report["verify"]["failure_stage"] == "host"
+
+
+def test_dcc_path_rejects_noncanonical_native_host_version(tmp_path, monkeypatch):
+    profile = tmp_path / "profiles" / "SketchUp 2026" / "SketchUp" / "Plugins"
+    profile.parent.mkdir(parents=True)
+    host = tmp_path / "Program Files" / "SketchUp" / "SketchUp 2026" / "SketchUp.exe"
+    host.parent.mkdir(parents=True)
+    host.write_bytes(b"MZ" + b"\0" * 512)
+    monkeypatch.setattr(install, "discover_plugin_dirs", lambda: [profile])
+    monkeypatch.setattr(install, "_native_host_version", lambda _path: "2026.0-rc1")
+
+    report, code, _ = install.run(["install", "--dcc-path", str(host), "--json", "--dry-run"])
+
+    assert code == install.EXIT_PREFLIGHT
+    assert report["verify"]["failure_stage"] == "host_version"
 
 
 def test_preflight_reports_an_unwritable_profile_with_exit_10(tmp_path, monkeypatch):

@@ -31,8 +31,8 @@ Issues="https://github.com/dcc-mcp/dcc-mcp-sketchup/issues"
 Installation="https://raw.githubusercontent.com/dcc-mcp/dcc-mcp-sketchup/main/install.md"
 
 [project.optional-dependencies]
-test=["pytest>=8","ruff>=0.8","PyYAML>=6"]
-dev=["pytest>=8","ruff>=0.8","PyYAML>=6","build>=1.2","twine>=6"]
+test=["pytest>=8","ruff>=0.8","PyYAML>=6","jsonschema>=4.23"]
+dev=["pytest>=8","ruff>=0.8","PyYAML>=6","jsonschema>=4.23","build>=1.2","twine>=6"]
 
 [project.scripts]
 dcc-mcp-sketchup="dcc_mcp_sketchup.server:main"
