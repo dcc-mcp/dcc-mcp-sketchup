@@ -1,4 +1,6 @@
 import json
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -392,6 +394,121 @@ def test_receipt_failure_rolls_back_extension_registration_and_receipt(tmp_path,
     assert receipt_path.read_bytes() == old_receipt
 
 
+def test_live_verify_failure_restores_the_exact_previous_install(tmp_path, monkeypatch):
+    plugins_dir = tmp_path / "SketchUp" / "SketchUp 2026" / "SketchUp" / "Plugins"
+    plugins_dir.parent.mkdir(parents=True)
+    monkeypatch.setattr(
+        install,
+        "verify_install",
+        lambda *_args, **_kwargs: {
+            "directly_usable": True,
+            "failure_stage": None,
+            "failure_reason": None,
+        },
+    )
+    _, install_code, _ = install.run(
+        ["install", "--plugins-dir", str(plugins_dir), "--yes", "--json"]
+    )
+    assert install_code == install.EXIT_OK
+
+    target = plugins_dir / install.EXTENSION_DIRECTORY
+    (target / "previous.rb").write_text("previous extension", encoding="utf-8")
+    (target / "operator-empty").mkdir()
+    registration = plugins_dir / install.REGISTRATION_FILENAME
+    registration.write_text("previous registration", encoding="utf-8")
+    receipt_path = plugins_dir / install.RECEIPT_RELATIVE_PATH
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["source_digest"] = "previous-release"
+    receipt_path.write_text(json.dumps(receipt, sort_keys=True), encoding="utf-8")
+    before = installed_bytes(plugins_dir)
+
+    def fail_live_verify(*_args, **_kwargs):
+        assert list(plugins_dir.glob(f".{install.EXTENSION_DIRECTORY}.backup-*"))
+        assert list(plugins_dir.glob(f".{install.REGISTRATION_FILENAME}.backup-*"))
+        assert list(receipt_path.parent.glob(f".{receipt_path.name}.backup-*"))
+        return {
+            "directly_usable": False,
+            "failure_stage": "readiness",
+            "failure_reason": "no live SketchUp sidecar",
+        }
+
+    monkeypatch.setattr(install, "verify_install", fail_live_verify)
+
+    report, upgrade_code, _ = install.run(
+        ["upgrade", "--plugins-dir", str(plugins_dir), "--yes", "--json"]
+    )
+
+    assert upgrade_code == install.EXIT_VERIFY
+    assert report["verify"]["failure_stage"] == "readiness"
+    assert report["previous_state_restored"] is True
+    assert installed_bytes(plugins_dir) == before
+    assert (target / "operator-empty").is_dir()
+    assert not list(plugins_dir.glob(".*.backup-*"))
+    assert not list(plugins_dir.glob(".*.failed-*"))
+    assert not list(receipt_path.parent.glob(".*.backup-*"))
+    assert not list(receipt_path.parent.glob(".*.failed-*"))
+    INSTALL_SOP_VALIDATOR.validate(report)
+
+
+def test_target_environment_rejects_pythonpath_shadow_modules(tmp_path, monkeypatch):
+    shadow_root = tmp_path / "shadow"
+    package = shadow_root / "dcc_mcp_sketchup"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text(
+        f"__version__ = {install.__version__!r}\n",
+        encoding="utf-8",
+    )
+    (package / "server.py").write_text("SHADOW = True\n", encoding="utf-8")
+    existing = os.environ.get("PYTHONPATH")
+    pythonpath = str(shadow_root) if not existing else str(shadow_root) + os.pathsep + existing
+    monkeypatch.setenv("PYTHONPATH", pythonpath)
+
+    with pytest.raises(install.InstallFailure, match="distribution") as raised:
+        install._target_environment(Path(sys.executable).resolve())
+
+    assert raised.value.exit_code == install.EXIT_PREFLIGHT
+    assert raised.value.stage == "python"
+
+
+def test_verify_rejects_pythonpath_shadow_modules_after_install(tmp_path, monkeypatch):
+    plugins_dir = tmp_path / "SketchUp" / "SketchUp 2026" / "SketchUp" / "Plugins"
+    plugins_dir.parent.mkdir(parents=True)
+    report = install.plan("install", plugins_dir, None, None)
+    install._install_from_report(report)
+
+    shadow_root = tmp_path / "verify-shadow"
+    package = shadow_root / "dcc_mcp_sketchup"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text(
+        f"__version__ = {install.__version__!r}\n",
+        encoding="utf-8",
+    )
+    (package / "server.py").write_text(
+        "from dcc_mcp_sketchup import __version__\n"
+        "def main(*_args):\n"
+        "    print(__version__)\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+    existing = os.environ.get("PYTHONPATH")
+    pythonpath = str(shadow_root) if not existing else str(shadow_root) + os.pathsep + existing
+    monkeypatch.setenv("PYTHONPATH", pythonpath)
+    monkeypatch.setattr(
+        install,
+        "wait_for_sidecar_ready",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("shadowed imports must fail before live readiness")
+        ),
+    )
+
+    verification = install.verify_install(plugins_dir, Path(report["python"]), 0.0)
+
+    assert verification["directly_usable"] is False
+    assert verification["failure_stage"] == "import"
+    assert "distribution" in verification["failure_reason"]
+
+
 def test_verify_diagnoses_the_exact_stale_server_path(tmp_path):
     plugins_dir = tmp_path / "SketchUp" / "SketchUp 2026" / "SketchUp" / "Plugins"
     plugins_dir.parent.mkdir(parents=True)
@@ -423,7 +540,7 @@ def test_verify_rejects_a_receipted_but_unloadable_sidecar(tmp_path, monkeypatch
     monkeypatch.setattr(
         install,
         "_python_import_check",
-        lambda _python: (_ for _ in ()).throw(
+        lambda _python, _identity: (_ for _ in ()).throw(
             AssertionError("unloadable sidecar must fail before import/readiness")
         ),
     )
@@ -448,7 +565,7 @@ def test_verify_rejects_sidecar_bytes_tampered_after_receipt(tmp_path, monkeypat
     monkeypatch.setattr(
         install,
         "_python_import_check",
-        lambda _python: (_ for _ in ()).throw(
+        lambda _python, _identity: (_ for _ in ()).throw(
             AssertionError("tampered sidecar must fail before import/readiness")
         ),
     )
@@ -547,7 +664,11 @@ def test_verify_requires_a_real_host_probe_and_emits_executable_recovery(tmp_pat
     monkeypatch.setattr(
         install,
         "_python_import_check",
-        lambda _python: {"success": True, "importable": True, "version": install.__version__},
+        lambda _python, _identity: {
+            "success": True,
+            "importable": True,
+            "version": install.__version__,
+        },
     )
     probe = {}
 
@@ -578,7 +699,11 @@ def test_verify_reports_usable_only_after_the_live_probe_succeeds(tmp_path, monk
     monkeypatch.setattr(
         install,
         "_python_import_check",
-        lambda _python: {"success": True, "importable": True, "version": install.__version__},
+        lambda _python, _identity: {
+            "success": True,
+            "importable": True,
+            "version": install.__version__,
+        },
     )
     monkeypatch.setattr(
         install,
@@ -603,7 +728,11 @@ def test_verify_rejects_a_foreign_2024_instance_for_the_2026_profile(tmp_path, m
     monkeypatch.setattr(
         install,
         "_python_import_check",
-        lambda _python: {"success": True, "importable": True, "version": install.__version__},
+        lambda _python, _identity: {
+            "success": True,
+            "importable": True,
+            "version": install.__version__,
+        },
     )
     monkeypatch.setattr(
         install,
@@ -642,7 +771,11 @@ def test_verify_rejects_noncanonical_or_unbounded_readiness_versions(
     monkeypatch.setattr(
         install,
         "_python_import_check",
-        lambda _python: {"success": True, "importable": True, "version": install.__version__},
+        lambda _python, _identity: {
+            "success": True,
+            "importable": True,
+            "version": install.__version__,
+        },
     )
     readiness = readiness_success(plugins_dir)
     readiness["entry"]["version"] = version
@@ -677,7 +810,11 @@ def test_verify_rejects_readiness_that_does_not_match_selected_identity(
     monkeypatch.setattr(
         install,
         "_python_import_check",
-        lambda _python: {"success": True, "importable": True, "version": install.__version__},
+        lambda _python, _identity: {
+            "success": True,
+            "importable": True,
+            "version": install.__version__,
+        },
     )
     readiness = readiness_success(
         plugins_dir,
@@ -712,7 +849,11 @@ def test_verify_rejects_a_host_process_path_outside_the_receipt(tmp_path, monkey
     monkeypatch.setattr(
         install,
         "_python_import_check",
-        lambda _python: {"success": True, "importable": True, "version": install.__version__},
+        lambda _python, _identity: {
+            "success": True,
+            "importable": True,
+            "version": install.__version__,
+        },
     )
     monkeypatch.setattr(
         install,
@@ -740,7 +881,11 @@ def test_verify_rejects_success_without_the_real_ruby_payload(tmp_path, monkeypa
     monkeypatch.setattr(
         install,
         "_python_import_check",
-        lambda _python: {"success": True, "importable": True, "version": install.__version__},
+        lambda _python, _identity: {
+            "success": True,
+            "importable": True,
+            "version": install.__version__,
+        },
     )
     readiness = readiness_success(plugins_dir)
     readiness["probe"]["result"].pop("structuredContent")
@@ -1036,7 +1181,11 @@ def test_verify_surfaces_the_latest_ruby_bootstrap_error(tmp_path, monkeypatch):
     monkeypatch.setattr(
         install,
         "_python_import_check",
-        lambda _python: {"success": True, "importable": True, "version": install.__version__},
+        lambda _python, _identity: {
+            "success": True,
+            "importable": True,
+            "version": install.__version__,
+        },
     )
     monkeypatch.setattr(
         install,

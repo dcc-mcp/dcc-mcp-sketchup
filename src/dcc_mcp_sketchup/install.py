@@ -19,6 +19,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
+from urllib.parse import urlsplit
+from urllib.request import url2pathname
 
 from dcc_mcp_core import __version__ as running_core_version
 from dcc_mcp_core.install_lifecycle import (
@@ -55,6 +57,109 @@ class InstallFailure(ValueError):
         self.exit_code = exit_code
         self.stage = stage
         self.reason = reason
+
+
+class _CommittedInstall:
+    """Retain the prior installation until post-commit live verification succeeds."""
+
+    def __init__(
+        self,
+        *,
+        target: Path,
+        registration: Path,
+        receipt_path: Optional[Path],
+        backup_target: Path,
+        backup_registration: Path,
+        backup_receipt: Optional[Path],
+        failed_target: Path,
+        failed_registration: Path,
+        failed_receipt: Optional[Path],
+    ) -> None:
+        self.target = target
+        self.registration = registration
+        self.receipt_path = receipt_path
+        self.backup_target = backup_target
+        self.backup_registration = backup_registration
+        self.backup_receipt = backup_receipt
+        self.failed_target = failed_target
+        self.failed_registration = failed_registration
+        self.failed_receipt = failed_receipt
+        self.target_preexisted = target.exists()
+        self.registration_preexisted = registration.exists()
+        self.receipt_preexisted = receipt_path is not None and receipt_path.exists()
+        self.target_backed_up = False
+        self.registration_backed_up = False
+        self.receipt_backed_up = False
+        self.target_installed = False
+        self.registration_installed = False
+        self.receipt_installed = False
+        self.rolled_back = False
+
+    @property
+    def had_previous_state(self) -> bool:
+        return self.target_preexisted or self.registration_preexisted or self.receipt_preexisted
+
+    def rollback(self) -> None:
+        if self.rolled_back:
+            return
+        try:
+            if (
+                self.receipt_installed
+                and self.receipt_path is not None
+                and self.receipt_path.exists()
+            ):
+                if self.failed_receipt is None:
+                    raise AssertionError("receipt rollback path was not created")
+                os.replace(self.receipt_path, self.failed_receipt)
+            if self.registration_installed and self.registration.exists():
+                os.replace(self.registration, self.failed_registration)
+            if self.target_installed and self.target.exists():
+                os.replace(self.target, self.failed_target)
+            if self.receipt_backed_up:
+                if self.backup_receipt is None or self.receipt_path is None:
+                    raise AssertionError("receipt backup path was not created")
+                os.replace(self.backup_receipt, self.receipt_path)
+            if self.registration_backed_up:
+                os.replace(self.backup_registration, self.registration)
+            if self.target_backed_up:
+                os.replace(self.backup_target, self.target)
+            expected = (
+                (self.target, self.target_preexisted),
+                (self.registration, self.registration_preexisted),
+            )
+            if self.receipt_path is not None:
+                expected += ((self.receipt_path, self.receipt_preexisted),)
+            if any(path.exists() != should_exist for path, should_exist in expected):
+                raise OSError("restored install paths do not match the prior state")
+        except BaseException as exc:
+            code = (
+                EXIT_REQUIRES_RESTART
+                if isinstance(exc, OSError) and _is_restart_lock_error(exc)
+                else EXIT_INSTALL
+            )
+            raise InstallFailure(
+                code,
+                "install",
+                "post-install verification failed and the prior installation could not be restored",
+            ) from exc
+        self.rolled_back = True
+
+    def finalize(self) -> None:
+        for directory in (self.failed_target, self.backup_target):
+            if directory.exists():
+                result = safe_remove_tree(directory)
+                if not result.get("success"):
+                    code = EXIT_REQUIRES_RESTART if result.get("requires_restart") else EXIT_INSTALL
+                    raise InstallFailure(
+                        code,
+                        "install",
+                        result.get("message", "failed to clean the install transaction"),
+                    )
+        for file_path in (self.failed_registration, self.backup_registration):
+            file_path.unlink(missing_ok=True)
+        for file_path in (self.failed_receipt, self.backup_receipt):
+            if file_path is not None:
+                file_path.unlink(missing_ok=True)
 
 
 def discover_plugin_dirs() -> list[Path]:
@@ -157,21 +262,156 @@ def _resolve_python(value: Optional[Path]) -> Path:
     return python
 
 
-def _target_environment(python: Path) -> dict[str, str]:
-    code = (
-        "import importlib.metadata as m, json, pathlib, sys, sysconfig; "
-        "import dcc_mcp_sketchup as p, dcc_mcp_sketchup.server as s; "
-        "d=m.distribution('dcc-mcp-sketchup'); "
-        "n='dcc-mcp-sketchup.exe' if sys.platform=='win32' else 'dcc-mcp-sketchup'; "
-        "x=(pathlib.Path(sysconfig.get_path('scripts'))/n).resolve(); "
-        "f=next((f for f in (d.files or ()) if pathlib.Path(d.locate_file(f)).resolve()==x),None); "
-        "h=f.hash if f is not None else None; "
-        "print(json.dumps({'python':sys.executable,'scripts':sysconfig.get_path('scripts'),"
-        "'core_version':m.version('dcc-mcp-core'),'adapter_version':m.version('dcc-mcp-sketchup'),"
-        "'module_version':p.__version__,'module_file':p.__file__,'server_file':s.__file__,"
-        "'launcher_path':str(x),'launcher_hash_mode':getattr(h,'mode',None),"
-        "'launcher_hash':getattr(h,'value',None)}))"
-    )
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _editable_distribution_root(direct_url: object) -> Optional[Path]:
+    if not isinstance(direct_url, dict):
+        return None
+    url = direct_url.get("url")
+    directory_info = direct_url.get("dir_info")
+    if (
+        not isinstance(url, str)
+        or not 0 < len(url) <= 2048
+        or not isinstance(directory_info, dict)
+        or directory_info.get("editable") is not True
+    ):
+        return None
+    parsed = urlsplit(url)
+    if parsed.scheme != "file" or parsed.query or parsed.fragment:
+        return None
+    url_path = f"//{parsed.netloc}{parsed.path}" if parsed.netloc else parsed.path
+    try:
+        root = Path(url2pathname(url_path)).resolve()
+    except (OSError, ValueError):
+        return None
+    return root if root.is_dir() else None
+
+
+def _distribution_identity(environment: dict[str, Any]) -> dict[str, Any]:
+    module_file = Path(str(environment.get("module_file") or "")).resolve()
+    server_file = Path(str(environment.get("server_file") or "")).resolve()
+    distribution_root = Path(str(environment.get("distribution_root") or "")).resolve()
+    if (
+        environment.get("adapter_version") != __version__
+        or environment.get("module_version") != __version__
+        or not module_file.is_file()
+        or not server_file.is_file()
+        or module_file.stat().st_size <= 0
+        or server_file.stat().st_size <= 0
+        or module_file.name != "__init__.py"
+        or server_file.name != "server.py"
+        or module_file.parent != server_file.parent
+        or module_file.parent.name != "dcc_mcp_sketchup"
+        or not distribution_root.is_dir()
+    ):
+        raise InstallFailure(
+            EXIT_PREFLIGHT,
+            "python",
+            "target interpreter did not load this dcc-mcp-sketchup distribution",
+        )
+
+    module_record = environment.get("module_record")
+    server_record = environment.get("server_record")
+    association = "record"
+    if isinstance(module_record, str) and isinstance(server_record, str):
+        if (
+            (distribution_root / module_record).resolve() != module_file
+            or (distribution_root / server_record).resolve() != server_file
+            or not _is_within(module_file, distribution_root)
+            or not _is_within(server_file, distribution_root)
+        ):
+            raise InstallFailure(
+                EXIT_PREFLIGHT,
+                "python",
+                "imported SketchUp adapter modules are outside distribution ownership",
+            )
+    else:
+        editable_root = _editable_distribution_root(environment.get("direct_url"))
+        candidates = ()
+        if editable_root is not None:
+            candidates = (
+                editable_root / "src" / "dcc_mcp_sketchup",
+                editable_root / "dcc_mcp_sketchup",
+            )
+        if not any(
+            module_file == (candidate / "__init__.py").resolve()
+            and server_file == (candidate / "server.py").resolve()
+            for candidate in candidates
+        ):
+            raise InstallFailure(
+                EXIT_PREFLIGHT,
+                "python",
+                "imported SketchUp adapter modules are not owned by the selected distribution",
+            )
+        association = "editable-direct-url"
+
+    direct_url = environment.get("direct_url")
+    direct_url_identity = None
+    if isinstance(direct_url, dict):
+        direct_url_identity = {
+            "url": direct_url.get("url"),
+            "editable": (direct_url.get("dir_info") or {}).get("editable")
+            if isinstance(direct_url.get("dir_info"), dict)
+            else None,
+        }
+    return {
+        "distribution": "dcc-mcp-sketchup",
+        "distribution_version": str(environment["adapter_version"]),
+        "distribution_root": str(distribution_root),
+        "module_version": str(environment["module_version"]),
+        "module_file": str(module_file),
+        "server_file": str(server_file),
+        "module_record": module_record,
+        "server_record": server_record,
+        "association": association,
+        "direct_url": direct_url_identity,
+    }
+
+
+def _target_environment(python: Path) -> dict[str, Any]:
+    code = """
+import importlib.metadata as m
+import json
+import pathlib
+import sys
+import sysconfig
+import dcc_mcp_sketchup as p
+import dcc_mcp_sketchup.server as s
+
+d = m.distribution("dcc-mcp-sketchup")
+n = "dcc-mcp-sketchup.exe" if sys.platform == "win32" else "dcc-mcp-sketchup"
+x = (pathlib.Path(sysconfig.get_path("scripts")) / n).resolve()
+files = tuple(d.files or ())
+owned = {str(pathlib.Path(d.locate_file(item)).resolve()): item for item in files}
+launcher_record = owned.get(str(x))
+launcher_hash = launcher_record.hash if launcher_record is not None else None
+module_file = pathlib.Path(p.__file__).resolve()
+server_file = pathlib.Path(s.__file__).resolve()
+direct_url_text = d.read_text("direct_url.json")
+direct_url = json.loads(direct_url_text) if direct_url_text else None
+print(json.dumps({
+    "python": sys.executable,
+    "scripts": sysconfig.get_path("scripts"),
+    "core_version": m.version("dcc-mcp-core"),
+    "adapter_version": d.version,
+    "module_version": p.__version__,
+    "module_file": str(module_file),
+    "server_file": str(server_file),
+    "distribution_root": str(pathlib.Path(d.locate_file("")).resolve()),
+    "module_record": str(owned[str(module_file)]) if str(module_file) in owned else None,
+    "server_record": str(owned[str(server_file)]) if str(server_file) in owned else None,
+    "direct_url": direct_url,
+    "launcher_path": str(x),
+    "launcher_hash_mode": getattr(launcher_hash, "mode", None),
+    "launcher_hash": getattr(launcher_hash, "value", None),
+}))
+""".strip()
     completed = _run_bounded_command([str(python), "-c", code], timeout=15)
     if not completed.get("success") or completed.get("truncated"):
         error_lines = str(completed.get("stderr") or "").strip().splitlines()
@@ -206,22 +446,14 @@ def _target_environment(python: Path) -> dict[str, str]:
             f"dcc-mcp-core {environment['core_version']} is unsupported; "
             f"version {MIN_CORE_VERSION} or newer is required",
         )
-    module_file = Path(str(environment.get("module_file") or ""))
-    server_file = Path(str(environment.get("server_file") or ""))
-    if (
-        environment.get("module_version") != __version__
-        or not module_file.is_file()
-        or not server_file.is_file()
-        or module_file.stat().st_size <= 0
-        or server_file.stat().st_size <= 0
-        or module_file.resolve().parent != server_file.resolve().parent
-    ):
+    if Path(str(environment.get("python") or "")).resolve() != python.resolve():
         raise InstallFailure(
             EXIT_PREFLIGHT,
             "python",
-            "target interpreter did not load this dcc-mcp-sketchup package",
+            "target interpreter identity changed during the package probe",
         )
-    return {key: str(value) for key, value in environment.items()}
+    environment["distribution_identity"] = _distribution_identity(environment)
+    return environment
 
 
 def _sidecar_manifest(path: Path) -> dict[str, Any]:
@@ -246,7 +478,7 @@ def _sidecar_manifest(path: Path) -> dict[str, Any]:
     return {"path": str(path.resolve()), "sha256": digest.hexdigest(), "size": size}
 
 
-def _target_server_executable(environment: dict[str, str]) -> Path:
+def _target_server_executable(environment: dict[str, Any]) -> Path:
     executable_name = "dcc-mcp-sketchup.exe" if sys.platform == "win32" else "dcc-mcp-sketchup"
     executable = Path(environment["scripts"]) / executable_name
     if (
@@ -727,6 +959,7 @@ def plan(
         "dcc_path": str(host_path) if host_path else None,
         "plugins_dir": str(plugins_dir),
         "python": str(python),
+        "python_distribution": environment["distribution_identity"],
         "server_path": str(server),
         "server": server_manifest,
         "instance_id": instance_id,
@@ -1144,6 +1377,7 @@ def _receipt_payload(report: dict[str, Any]) -> dict[str, Any]:
         "dcc_path": report["dcc_path"],
         "plugins_dir": str(plugins_dir),
         "python": report["python"],
+        "python_distribution": report.get("python_distribution"),
         "server_path": report["server_path"],
         "server": report["server"],
         "extension_path": str(target),
@@ -1222,7 +1456,11 @@ def _next_steps(report: dict[str, Any]) -> list[dict[str, Any]]:
     return steps
 
 
-def _install_from_report(report: dict[str, Any]) -> None:
+def _install_from_report(
+    report: dict[str, Any],
+    *,
+    retain_backups: bool = False,
+) -> Optional[_CommittedInstall]:
     plugins_dir = Path(report["plugins_dir"])
     plugins_dir.mkdir(parents=True, exist_ok=True)
     target = plugins_dir / EXTENSION_DIRECTORY
@@ -1243,13 +1481,14 @@ def _install_from_report(report: dict[str, Any]) -> None:
         Path(report["server_path"]),
     )
     try:
-        _commit_staged_extension(
+        return _commit_staged_extension(
             staged_target,
             staged_registration,
             target,
             registration,
             receipt_path=receipt_path,
             receipt_factory=lambda: _receipt_payload(report),
+            retain_backups=retain_backups,
         )
     finally:
         safe_remove_tree(staging_root)
@@ -1398,7 +1637,7 @@ def verify_install(
         )
         return result
 
-    result["import"] = _python_import_check(python)
+    result["import"] = _python_import_check(python, receipt.get("python_distribution"))
     if not result["import"].get("success"):
         result.update(
             failure_stage="import",
@@ -1579,32 +1818,26 @@ def _process_executable_path(pid: int) -> Optional[Path]:
         return None
 
 
-def _python_import_check(python: Path) -> dict[str, Any]:
-    code = (
-        "import json, dcc_mcp_sketchup; "
-        "print(json.dumps({'importable': True, 'version': dcc_mcp_sketchup.__version__}))"
-    )
-    completed = _run_bounded_command([str(python), "-c", code], timeout=15)
-    if not completed.get("success") or completed.get("truncated"):
-        error_lines = str(completed.get("stderr") or "").strip().splitlines()
-        return {
-            "success": False,
-            "reason": error_lines[-1]
-            if error_lines
-            else str(completed.get("reason") or "adapter import failed"),
-        }
+def _python_import_check(python: Path, expected_identity: object) -> dict[str, Any]:
     try:
-        payload = json.loads(str(completed.get("stdout") or "").strip())
-    except json.JSONDecodeError:
-        return {"success": False, "reason": "target interpreter returned invalid output"}
-    if payload.get("version") != __version__:
+        environment = _target_environment(python)
+    except InstallFailure as exc:
+        return {"success": False, "reason": exc.reason}
+    identity = environment.get("distribution_identity")
+    if not isinstance(expected_identity, dict) or identity != expected_identity:
         return {
             "success": False,
-            "version": payload.get("version"),
+            "version": environment.get("module_version"),
             "expected_version": __version__,
-            "reason": "target interpreter adapter version does not match this installer",
+            "distribution": identity,
+            "reason": "target interpreter distribution identity differs from the install receipt",
         }
-    return {"success": bool(payload.get("importable")), **payload}
+    return {
+        "success": True,
+        "importable": True,
+        "version": environment["module_version"],
+        "distribution": identity,
+    }
 
 
 def _last_bootstrap_error(path: Path) -> Optional[dict[str, Any]]:
@@ -1625,23 +1858,41 @@ def _last_bootstrap_error(path: Path) -> Optional[dict[str, Any]]:
 def _execute_install(report: dict[str, Any], timeout: float) -> tuple[dict[str, Any], int]:
     plugins_dir = Path(report["plugins_dir"])
     state = report["installation_state"]
+    transaction: Optional[_CommittedInstall] = None
     if state != "current":
-        _install_from_report(report)
+        transaction = _install_from_report(report, retain_backups=True)
     report["steps"][-1] = {
         "id": report["verb"],
         "status": "ok",
         "previous_state": state,
     }
-    report["verify"] = verify_install(
-        plugins_dir,
-        Path(report["python"]),
-        timeout,
-        instance_id=report.get("instance_id"),
-        host_pid=report.get("host_pid"),
-    )
+    try:
+        report["verify"] = verify_install(
+            plugins_dir,
+            Path(report["python"]),
+            timeout,
+            instance_id=report.get("instance_id"),
+            host_pid=report.get("host_pid"),
+        )
+    except BaseException:
+        if transaction is not None:
+            transaction.rollback()
+            transaction.finalize()
+        raise
     if report["verify"]["directly_usable"]:
+        if transaction is not None:
+            transaction.finalize()
         report["status"] = "ok"
         return report, EXIT_OK
+    if transaction is not None:
+        transaction.rollback()
+        transaction.finalize()
+        report["previous_state_restored"] = True
+        report["steps"][-1] = {
+            "id": report["verb"],
+            "status": "rolled-back",
+            "previous_state": state,
+        }
     report["status"] = "failed"
     report["next_steps"] = _next_steps(report)
     return report, EXIT_VERIFY
@@ -1687,7 +1938,8 @@ def _commit_staged_extension(
     *,
     receipt_path: Optional[Path] = None,
     receipt_factory: Optional[Callable[[], dict[str, Any]]] = None,
-) -> None:
+    retain_backups: bool = False,
+) -> Optional[_CommittedInstall]:
     """Commit a prepared extension and restore the previous pair on failure."""
     transaction_id = uuid.uuid4().hex
     backup_target = target.with_name(f".{target.name}.backup-{transaction_id}")
@@ -1704,67 +1956,47 @@ def _commit_staged_extension(
         if receipt_path is not None
         else None
     )
-    target_backed_up = False
-    registration_backed_up = False
-    receipt_backed_up = False
-    target_installed = False
-    registration_installed = False
-    receipt_installed = False
+    transaction = _CommittedInstall(
+        target=target,
+        registration=registration,
+        receipt_path=receipt_path,
+        backup_target=backup_target,
+        backup_registration=backup_registration,
+        backup_receipt=backup_receipt,
+        failed_target=failed_target,
+        failed_registration=failed_registration,
+        failed_receipt=failed_receipt,
+    )
 
     try:
         if target.exists():
             os.replace(target, backup_target)
-            target_backed_up = True
+            transaction.target_backed_up = True
         if registration.exists():
             os.replace(registration, backup_registration)
-            registration_backed_up = True
+            transaction.registration_backed_up = True
         if receipt_path is not None and receipt_path.exists():
             if backup_receipt is None:
                 raise AssertionError("receipt backup path was not created")
             os.replace(receipt_path, backup_receipt)
-            receipt_backed_up = True
+            transaction.receipt_backed_up = True
         os.replace(staged_target, target)
-        target_installed = True
+        transaction.target_installed = True
         os.replace(staged_registration, registration)
-        registration_installed = True
+        transaction.registration_installed = True
         if receipt_path is not None:
             if receipt_factory is None:
                 raise ValueError("receipt_factory is required with receipt_path")
             _write_json_atomic(receipt_path, receipt_factory())
-            receipt_installed = True
+            transaction.receipt_installed = True
     except BaseException:
-        if (
-            receipt_installed
-            and receipt_path is not None
-            and receipt_path.exists()
-            and failed_receipt is not None
-        ):
-            os.replace(receipt_path, failed_receipt)
-        if registration_installed and registration.exists():
-            os.replace(registration, failed_registration)
-        if target_installed and target.exists():
-            os.replace(target, failed_target)
-        if (
-            receipt_backed_up
-            and backup_receipt is not None
-            and backup_receipt.exists()
-            and receipt_path is not None
-        ):
-            os.replace(backup_receipt, receipt_path)
-        if registration_backed_up and backup_registration.exists():
-            os.replace(backup_registration, registration)
-        if target_backed_up and backup_target.exists():
-            os.replace(backup_target, target)
+        transaction.rollback()
+        transaction.finalize()
         raise
-    finally:
-        for directory in (failed_target, backup_target):
-            if directory.exists():
-                safe_remove_tree(directory)
-        for file_path in (failed_registration, backup_registration):
-            file_path.unlink(missing_ok=True)
-        for file_path in (failed_receipt, backup_receipt):
-            if file_path is not None:
-                file_path.unlink(missing_ok=True)
+    if retain_backups:
+        return transaction
+    transaction.finalize()
+    return None
 
 
 def uninstall_extension(plugins_dir: Path) -> bool:
