@@ -262,6 +262,13 @@ class CommandsTest < Minitest::Test
     assert_equal File.expand_path('../../src/dcc_mcp_sketchup/sketchup_plugin', __dir__), result['plugin_path']
   end
 
+  def test_adapter_version_matches_python_package_version
+    version_file = File.expand_path('../../src/dcc_mcp_sketchup/__version__.py', __dir__)
+    package_version = File.read(version_file).match(/__version__ = ["']([^"']+)["']/)[1]
+
+    assert_equal package_version, DccMcp::SketchupAdapter::Commands::ADAPTER_VERSION
+  end
+
   def test_add_box_uses_one_undo_operation_and_returns_persistent_id
     result = @commands.execute(
       'geometry.add_box',
