@@ -28,11 +28,11 @@ lets a caller infer otherwise.
 from __future__ import annotations
 
 import json
-import os
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-MATRIX_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "compat_matrix.json")
+MATRIX_PATH = Path(__file__).resolve().parent / "compat_matrix.json"
 
 SUPPORTED = "supported"
 TOO_OLD = "too_old"
