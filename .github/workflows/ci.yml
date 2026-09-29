@@ -80,7 +80,33 @@ jobs:
         shell: bash
         run: |
           python -m pip install --force-reinstall --no-deps dist/*.whl
-          python -c "import importlib.metadata as m, importlib.resources as r, dcc_mcp_sketchup as p; assert p.__version__ == m.version('dcc-mcp-sketchup'); root = r.files('dcc_mcp_sketchup'); assert root.joinpath('sketchup_plugin', 'runtime.rb').is_file(); assert root.joinpath('sketchup_plugin', 'bootstrap_errors.rb').is_file(); assert root.joinpath('sketchup_plugin', 'verification.rb').is_file(); assert root.joinpath('skills', 'sketchup-session', 'SKILL.md').is_file()"
+          # Report every missing packaged file at once, and name the resolved
+          # package root. A bare assert here fails with no message, which costs
+          # a full CI round trip to diagnose.
+          python - <<'PY'
+          import importlib.metadata as m
+          import importlib.resources as r
+
+          import dcc_mcp_sketchup as p
+
+          root = r.files("dcc_mcp_sketchup")
+          print("package root:", root)
+          expected = [
+              ("sketchup_plugin", "runtime.rb"),
+              ("sketchup_plugin", "bootstrap_errors.rb"),
+              ("sketchup_plugin", "verification.rb"),
+              ("sketchup_plugin", "commands.rb"),
+              ("compat_matrix.json",),
+              ("compat.py",),
+              ("doctor.py",),
+              ("write_contract.py",),
+              ("skills", "sketchup-session", "SKILL.md"),
+          ]
+          missing = ["/".join(parts) for parts in expected if not root.joinpath(*parts).is_file()]
+          assert not missing, "missing from wheel: %s" % missing
+          assert p.__version__ == m.version("dcc-mcp-sketchup"), (p.__version__, m.version("dcc-mcp-sketchup"))
+          print("wheel contents OK:", len(expected), "paths")
+          PY
           python -c "import importlib.resources as r, json; from dcc_mcp_sketchup.compat import MATRIX_PATH, load_matrix, supported_range_labels; raw = r.files('dcc_mcp_sketchup').joinpath('compat_matrix.json').read_text(encoding='utf-8'); assert json.loads(raw) == load_matrix(); assert MATRIX_PATH.is_file(); assert '2026' in supported_range_labels()"
           python -c "import importlib.metadata as m, subprocess; expected = m.version('dcc-mcp-sketchup'); actual = subprocess.check_output(['dcc-mcp-sketchup', '--version'], text=True).strip(); assert actual == expected, (actual, expected)"
           python -c "import importlib.metadata as m; from packaging.requirements import Requirement; from packaging.version import Version; requirement = next(Requirement(item) for item in m.requires('dcc-mcp-sketchup') if Requirement(item).name == 'dcc-mcp-core'); assert Version('0.20.36') in requirement.specifier and Version('0.20.35') not in requirement.specifier"
