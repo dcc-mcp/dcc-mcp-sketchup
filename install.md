@@ -8,7 +8,7 @@ default and uses stable exit codes: `0` success, `10` preflight, `20` acquire, `
 
 - SketchUp Desktop 2021 or newer on Windows or macOS.
 - Python 3.9 or newer containing `dcc-mcp-sketchup` and
-  `dcc-mcp-core>=0.20.14,<1.0.0`.
+  `dcc-mcp-core>=0.20.36,<1.0.0`.
 - A versioned per-user SketchUp profile created by starting the selected SketchUp version once.
 
 SketchUp Desktop is supported on Windows and macOS. Linux is not a supported SketchUp host
@@ -21,6 +21,70 @@ the command.
 SketchUp 2021 and newer versioned profiles are supported. The installer selects the newest
 profile by default. `--dcc-path` selects an exact SketchUp executable or application bundle and
 requires a matching versioned profile; it never silently installs into another SketchUp version.
+
+## Two runtimes: host-side Python and in-SketchUp Ruby
+
+The adapter is two programs separated by an authenticated loopback socket, and the boundary
+determines what each side can prove.
+
+| | Host-side Python sidecar | In-SketchUp Ruby extension |
+| --- | --- | --- |
+| Runs in | A separate Python process, one per SketchUp PID | The SketchUp process, on the UI thread |
+| Owns | MCP surface, skill schemas, install lifecycle, compatibility matrix | The model: every read and every mutation |
+| Started by | The Ruby extension, which passes it the port and token | SketchUp, when it loads the Plugins directory |
+| Can see | Nothing about the model until the host answers | The whole model, and only on the UI thread |
+
+**Discovery order.** SketchUp launches the sidecar, never the reverse. The extension binds an
+ephemeral loopback port, generates a random per-session token, exports
+`DCC_MCP_SKETCHUP_BRIDGE_PORT` and `DCC_MCP_SKETCHUP_BRIDGE_TOKEN` to the child, and spawns the
+sidecar. The sidecar polls `bridge.health` until SketchUp answers and exits when the host PID
+disappears. Readiness is therefore only ever established by the host answering across the
+socket — a running Python process, or files copied into place, are not readiness evidence.
+
+**Bridge protocol.** One JSON-RPC request per connection over `127.0.0.1`, at most 16
+connections and one request in flight on the UI thread. Requests carry a 32-hex request id and a
+deadline; responses are correlated by id and compared in constant time. `bridge.health` is a
+virtual method the Ruby runtime routes to `diagnostics.ping`.
+
+**Mutations are proven on the Ruby side.** Python cannot read the model, so every mutating tool
+requires the Ruby extension to re-read the target and report `expected` / `actual` evidence
+before the tool returns success. A read-back that disagrees aborts the undo operation and
+reports the tool, the check, both values, and the host product year. Python additionally
+rejects any mutating result that arrives without a verified read-back block.
+
+## Host support
+
+Supported versions come from one machine-readable file, `compat_matrix.json`, shipped inside the
+wheel. It is the single source of truth: the `doctor`, this installer's `verify`, and the Ruby
+API probe all read it. A product year outside the declared ranges is rejected with an explicit
+error code; it is never silently treated as compatible.
+
+SketchUp reports its version either as a product year (`2026.0`) or as a build line
+(`26.0.575`). Both name the same application, so both are folded onto the product year before
+classification.
+
+```bash
+dcc-mcp-sketchup doctor --json
+```
+
+`doctor` separates what it observes from what it infers:
+
+- `checks.installed_host` — a SketchUp executable and matching profile exist on this machine.
+- `checks.live_host` — a SketchUp process answered `bridge.health`. Only here are
+  `sketchup_version` and `ruby_version` observed rather than inferred.
+- `checks.host_matrix` — the version classified against the matrix, with `source` naming whether
+  the version came from the live host or from an installed profile.
+- `checks.api_surface` — which required Ruby API symbols the live host actually exposes. The
+  symbol list is sent from the matrix, so the Ruby side never owns a second copy that could drift.
+- `verify.directly_usable` — true only when every check passed, which requires a live host.
+
+An installed-but-not-running SketchUp exits `40` with error code
+`sketchup_host_not_running`: an executable on disk is not evidence the adapter works.
+
+`verify --json` reports the same matrix verdict for the profile being verified, under
+`verify.host_matrix`. It only fails on the matrix when a host version was actually resolved and
+found unsupported — on Linux, where no SketchUp release exists, nothing is discovered and the
+readiness check remains the gate.
 
 ## Agent quick path
 

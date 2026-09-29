@@ -58,6 +58,10 @@ def test_tool_manifests_are_typed_and_point_to_scripts():
     ruby_methods = set(
         re.findall(r"'([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+)' => method", ruby_source)
     )
-    assert ruby_methods - {"diagnostics.ping"} == script_methods - {"bridge.health"}
-    assert "diagnostics.ping" in ruby_methods
+    # The diagnostics namespace is the doctor's preflight surface, not a skill
+    # tool: `ping` backs bridge.health and `api_probe` answers the compatibility
+    # matrix's required-symbol question. Neither is ever called through a skill.
+    diagnostics = {"diagnostics.ping", "diagnostics.api_probe"}
+    assert ruby_methods - diagnostics == script_methods - {"bridge.health"}
+    assert diagnostics <= ruby_methods
     assert "bridge.health" in script_methods
