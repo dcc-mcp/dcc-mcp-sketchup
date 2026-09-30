@@ -29,7 +29,13 @@ def bridge_main(method: str, message: str) -> Callable[..., dict[str, Any]]:
     @skill_entry
     def main(**kwargs: Any) -> dict[str, Any]:
         bridge = get_bridge()
-        result = bridge.call(method, **kwargs)
+        try:
+            result = bridge.call(method, **kwargs)
+        except WriteVerificationError as exc:
+            # A read-back disagreement is raised by bridge.call as soon as the
+            # Ruby side reports it, so it never reaches require_verification.
+            # It is the same failure class and owes the same host context.
+            raise _with_host_context(bridge, exc) from None
         if kind != MUTATING:
             if isinstance(result, dict):
                 return skill_success(message, **result)
@@ -47,26 +53,36 @@ def bridge_main(method: str, message: str) -> Callable[..., dict[str, Any]]:
 
 
 def _with_host_context(bridge: Any, error: WriteVerificationError) -> WriteVerificationError:
-    """Attach the live host version and matrix verdict to a read-back failure.
+    """Attach the host version and matrix verdict to a read-back failure.
 
-    Only runs on the failure path: the Ruby side stamps its own host version
-    into a verification payload it produced, so the extra round trip is needed
-    only when nothing came back at all. A failure to resolve the host degrades
-    to the original error rather than masking it -- the read-back disagreement
-    is the finding, and a missing version only makes it less reproducible.
+    Only runs on the failure path. Both failure sources funnel through here:
+    a Ruby payload that reached Python without evidence, and a Ruby read-back
+    that disagreed and was raised on the way out of ``bridge.call``.
+
+    The Ruby side stamps its own host version into the payloads it builds, so
+    the extra round trip is paid only when the payload arrived without one.
+    That is also the case that needs it most: a payload with no host version is
+    a failure rebuilt from the bare error envelope rather than produced by the
+    running host.
+
+    A failure to resolve the host degrades to the original error rather than
+    masking it -- the read-back disagreement is the finding, and a missing
+    version only makes it less reproducible.
     """
-    try:
-        runtime = bridge.status()
-    except Exception:
-        return error
-    version = runtime.get("sketchup_version") if isinstance(runtime, dict) else None
+    payload = dict(error.payload)
+    version = payload.get("host_version")
     if not version:
-        return error
+        try:
+            runtime = bridge.status()
+        except Exception:
+            return error
+        version = runtime.get("sketchup_version") if isinstance(runtime, dict) else None
+        if not version:
+            return error
+        payload["host_version"] = version
     try:
         host_matrix = classify_host(version, load_matrix())
     except Exception:
         host_matrix = None
-    payload = dict(error.payload)
-    payload["host_version"] = version
     payload["host_matrix"] = host_matrix
     return WriteVerificationError.from_payload(payload)

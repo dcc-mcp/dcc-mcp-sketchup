@@ -398,7 +398,7 @@ def doctor_report(verb: str = "doctor", timeout: float = 30.0) -> dict[str, Any]
         reason = "SketchUp %s does not expose %d required Ruby API symbol(s): %s" % (
             version,
             len(missing),
-            ", ".join("%s%s" % (item.get("owner"), item.get("symbol")) for item in missing),
+            ", ".join("%s#%s" % (item.get("owner"), item.get("symbol")) for item in missing),
         )
         steps.append({"id": "verify-api-surface", "status": "failed", "message": reason})
         return _report(
