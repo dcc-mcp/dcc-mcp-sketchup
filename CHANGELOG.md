@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/dcc-mcp/dcc-mcp-sketchup/compare/v0.2.0...v0.3.0) (2026-10-01)
+
+
+### Features
+
+* host compatibility matrix, doctor, and cross-Ruby write verification ([15bc231](https://github.com/dcc-mcp/dcc-mcp-sketchup/commit/15bc231a89069e500d2261dc5b2996ca0c886b36))
+
 ## [0.2.0](https://github.com/dcc-mcp/dcc-mcp-sketchup/compare/v0.1.0...v0.2.0) (2026-08-24)
 
 
