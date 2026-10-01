@@ -51,11 +51,41 @@ Frame, response, connection, and deadline limits keep every tick bounded while
 preserving SketchUp's thread affinity. No worker thread performs socket I/O or
 calls the SketchUp API. Every model mutation is a named undoable operation.
 
+## Two runtimes: host-side Python, in-SketchUp Ruby
+
+This adapter is two programs, not one. Knowing which side owns what explains
+most of its behaviour.
+
+| | Host-side Python sidecar | In-SketchUp Ruby extension |
+| --- | --- | --- |
+| Runs in | A separate Python process, one per SketchUp PID | The SketchUp process, on the UI thread |
+| Owns | MCP surface, skill schemas, install lifecycle, compatibility matrix | The model: every read and every mutation |
+| Talks | Authenticated JSON-RPC over loopback, newline-delimited | Same socket, pumped by a `UI.start_timer` callback |
+| Can see | Nothing about the model until the host answers | The whole model, and only on the UI thread |
+
+**Discovery order.** SketchUp launches the sidecar, not the other way round.
+The extension binds an ephemeral loopback port, generates a random per-session
+token, writes `DCC_MCP_SKETCHUP_BRIDGE_PORT` / `_TOKEN` into the child
+environment, and spawns the sidecar. The sidecar then polls `bridge.health`
+until SketchUp answers, and exits when the host PID disappears. So a running
+Python process alone proves nothing; readiness is only ever established by the
+host answering across that socket.
+
+**Bridge protocol.** One JSON-RPC request per connection, at most 16
+connections, one request in flight on the UI thread. Requests carry a 32-hex
+request id and a deadline; responses are correlated by id and compared in
+constant time. `bridge.health` is a virtual method that the Ruby runtime routes
+to `diagnostics.ping`.
+
+**Python cannot verify anything on its own.** It cannot read the model, so a
+mutation is only proven once the Ruby side has read the target back. See
+[Write verification](#write-verification-across-the-ruby-boundary).
+
 ## Requirements
 
 - SketchUp Desktop 2021 or newer on Windows or macOS.
 - Python 3.9 or newer for the external sidecar.
-- `dcc-mcp-core>=0.20.14,<1.0.0` (installed automatically).
+- `dcc-mcp-core>=0.20.36,<1.0.0` (installed automatically).
 
 Importer and exporter availability varies by SketchUp edition, version, and
 installed extensions. The adapter reports the host error instead of claiming a
@@ -108,6 +138,58 @@ File paths must be absolute. Existing export and copy targets are refused unless
 `overwrite=true`. Removing a material or Tag is refused while model content uses
 it. The default Untagged Tag is never removable.
 
+## Host support (doctor)
+
+Supported SketchUp versions are declared in one machine-readable file,
+`src/dcc_mcp_sketchup/compat_matrix.json`, which ships inside the wheel. It is
+the single source of truth: the `doctor`, the installer's `verify`, and the Ruby
+API probe all read it. A version outside the declared ranges is rejected with an
+explicit error code instead of being assumed compatible.
+
+`doctor` reports what it can actually observe, and says so when it cannot:
+
+```bash
+dcc-mcp-sketchup doctor --json
+```
+
+| Report field | Meaning |
+| --- | --- |
+| `checks.installed_host` | A SketchUp executable and matching versioned profile exist on this machine |
+| `checks.live_host` | A SketchUp process answered `bridge.health`; `sketchup_version` and `ruby_version` are observed, not inferred |
+| `checks.host_matrix` | The version classified against the matrix, plus `source` (`live_host` or `installed_host`) |
+| `checks.api_surface` | Which required Ruby API symbols the live host actually exposes |
+| `verify.directly_usable` | True only when every check passed, which requires a **live** host |
+
+Exit codes follow the install lifecycle: `0` usable, `10` preflight, `40`
+verify. Installed-but-not-running SketchUp exits `40` with
+`error_code` `sketchup_host_not_running` — an executable on disk is not evidence
+that the adapter works.
+
+SketchUp reports its version either as a product year (`2026.0`) or as a build
+line (`26.0.575`). Both name the same application, so `doctor` folds both onto
+the product year before classifying.
+
+### Write verification across the Ruby boundary
+
+Every mutating tool proves its change took effect before it reports success. The
+read-back runs **on the Ruby side**, because Python cannot see the model, and is
+enforced **on the Python side**, because a read-back only Ruby knows about is
+not a contract:
+
+1. Ruby performs the mutation inside a named undoable operation, then re-reads
+   the target through its persistent id and records `expected` / `actual` pairs.
+2. A disagreement is raised before the operation commits, so the mutation is
+   rolled back rather than left half-applied. The error carries the tool, the
+   check, both values, and the host version.
+3. Ruby returns a `verification` block with the checks that passed.
+4. Python rejects any mutating result that does not carry a verified block, so a
+   Ruby side that stopped verifying, or a response that never crossed the wire,
+   fails instead of being read as success.
+
+Adding a command to the Ruby map without deciding whether it owes a read-back
+fails the test suite. That classification lives in
+`src/dcc_mcp_sketchup/write_contract.py`.
+
 ## Development and verification
 
 ```bash
@@ -117,12 +199,29 @@ python -m ruff check src tests
 python -m ruff format --check src tests
 python -m build
 python -m twine check dist/*
-ruby tests/ruby/test_commands.rb
+ruby -e 'Dir["tests/ruby/test_*.rb"].sort.each { |file| require File.expand_path(file) }'
 ```
 
-CI covers Python 3.9 through 3.12 on Windows, macOS, and Linux, plus Ruby
-syntax and command-contract tests. A production release additionally requires a
-real SketchUp Desktop smoke test and a fresh installation from public PyPI.
+CI covers Python 3.9 through 3.12 on Windows, macOS, and Linux, plus a Ruby job
+running syntax checks and contract tests. A production release additionally
+requires a real SketchUp Desktop smoke test and a fresh installation from public
+PyPI.
+
+### What the Ruby job does and does not prove
+
+The Ruby job runs against `tests/ruby/sketchup_fakes.rb`, an in-memory stub of
+the SketchUp API. It is **contract-level evidence, not host-level evidence**:
+
+- It proves the command layer honours its contract: parameter validation, typed
+  coercion, one undo operation per mutation, and a read-back that disagrees
+  loudly when the model does not match the request.
+- It does **not** prove that a real SketchUp executed the commands, or that the
+  SketchUp Ruby API on a given product year behaves as the stubs do.
+
+SketchUp is a licensed desktop application that cannot be installed on a hosted
+runner, so no host-level end-to-end run exists in CI. Every entry in
+`compat_matrix.json` records that bound, and the doctor echoes it. Contract
+green is not host green, and nothing in this repository treats it as such.
 
 ## Security boundary
 

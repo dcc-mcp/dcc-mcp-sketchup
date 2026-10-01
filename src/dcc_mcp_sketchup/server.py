@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import signal
 import sys
@@ -19,6 +20,7 @@ from . import bridge
 from . import install as install_lifecycle
 from .__version__ import __version__
 from .dispatcher import SketchupBridgeDispatcher
+from .doctor import doctor_report
 
 _server: Optional["SketchupMcpServer"] = None
 
@@ -189,6 +191,16 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--bridge-port", type=int, required=True)
     serve.add_argument("--mcp-port", type=int)
 
+    # `verify` already belongs to the install lifecycle, so host compatibility
+    # is exposed under `doctor`. The doctor's own report is the same shape for
+    # either verb, and the install lifecycle adds the host matrix verdict to its
+    # own `verify --json` output, so both entry points report real host support.
+    doctor = subparsers.add_parser(
+        "doctor", help="Report the live SketchUp host and its compatibility matrix verdict."
+    )
+    doctor.add_argument("--json", action="store_true", dest="as_json")
+    doctor.add_argument("--timeout", type=float, default=30.0)
+
     lifecycle_help = {
         "install": "Plan or install the SketchUp Ruby extension.",
         "status": "Inspect the selected installation and receipt.",
@@ -233,6 +245,19 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             raise SystemExit(code)
         return
     args = _build_parser().parse_args(resolved)
+    if args.command == "doctor":
+        report = doctor_report(args.command, args.timeout)
+        exit_code = int(report.pop("_exit_code"))
+        if args.as_json:
+            print(json.dumps(report, sort_keys=True))
+        else:
+            print("%s: %s" % (args.command, report["status"]))
+            for step in report["steps"]:
+                if step.get("message"):
+                    print("  - %s: %s" % (step["id"], step["message"]))
+            if report["verify"]["failure_reason"]:
+                print("  reason: %s" % report["verify"]["failure_reason"])
+        raise SystemExit(exit_code)
     _run_sidecar(args)
 
 

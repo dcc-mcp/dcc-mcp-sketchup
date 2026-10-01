@@ -33,6 +33,13 @@ jobs:
       - run: python -m pip install -e ".[test]"
       - run: python -m pytest
 
+  # Contract-level evidence only. These jobs exercise the Ruby command layer
+  # against tests/ruby/sketchup_fakes.rb, an in-memory stub of the SketchUp API.
+  # They prove the command map honours its contract (validation, undo scoping,
+  # post-write read-back); they do NOT prove a real SketchUp executed the
+  # commands. SketchUp is licensed desktop software that cannot be installed on
+  # a hosted runner, so no host-level run is possible here. Do not describe this
+  # job as host verification -- see compat_matrix.json#evidence_bound.
   ruby-extension:
     name: Ruby ${{ matrix.ruby }} extension contract on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -57,7 +64,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      CORE_INSTALL_SOP_VERSION: "0.20.14"
+      CORE_INSTALL_SOP_VERSION: "0.20.36"
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -73,10 +80,63 @@ jobs:
         shell: bash
         run: |
           python -m pip install --force-reinstall --no-deps dist/*.whl
-          python -c "import importlib.metadata as m, importlib.resources as r, dcc_mcp_sketchup as p; assert p.__version__ == m.version('dcc-mcp-sketchup'); root = r.files('dcc_mcp_sketchup'); assert root.joinpath('sketchup_plugin', 'runtime.rb').is_file(); assert root.joinpath('sketchup_plugin', 'bootstrap_errors.rb').is_file(); assert root.joinpath('skills', 'sketchup-session', 'SKILL.md').is_file()"
+          # Report every missing packaged file at once, and name the resolved
+          # package root. A bare assert here fails with no message, which costs
+          # a full CI round trip to diagnose.
+          python - <<'PY'
+          import importlib.metadata as m
+          import importlib.resources as r
+
+          import dcc_mcp_sketchup as p
+
+          root = r.files("dcc_mcp_sketchup")
+          print("package root:", root)
+          expected = [
+              ("sketchup_plugin", "runtime.rb"),
+              ("sketchup_plugin", "bootstrap_errors.rb"),
+              ("sketchup_plugin", "verification.rb"),
+              ("sketchup_plugin", "commands.rb"),
+              ("compat_matrix.json",),
+              ("compat.py",),
+              ("doctor.py",),
+              ("write_contract.py",),
+              ("skills", "sketchup-session", "SKILL.md"),
+          ]
+          missing = ["/".join(parts) for parts in expected if not root.joinpath(*parts).is_file()]
+          assert not missing, "missing from wheel: %s" % missing
+          assert p.__version__ == m.version("dcc-mcp-sketchup"), (p.__version__, m.version("dcc-mcp-sketchup"))
+          print("wheel contents OK:", len(expected), "paths")
+          PY
+          python -c "import importlib.resources as r, json; from dcc_mcp_sketchup.compat import MATRIX_PATH, load_matrix, supported_range_labels; raw = r.files('dcc_mcp_sketchup').joinpath('compat_matrix.json').read_text(encoding='utf-8'); assert json.loads(raw) == load_matrix(); assert MATRIX_PATH.is_file(); assert '2026' in supported_range_labels()"
           python -c "import importlib.metadata as m, subprocess; expected = m.version('dcc-mcp-sketchup'); actual = subprocess.check_output(['dcc-mcp-sketchup', '--version'], text=True).strip(); assert actual == expected, (actual, expected)"
-          python -c "import importlib.metadata as m; from packaging.requirements import Requirement; from packaging.version import Version; requirement = next(Requirement(item) for item in m.requires('dcc-mcp-sketchup') if Requirement(item).name == 'dcc-mcp-core'); assert Version('0.20.14') in requirement.specifier and Version('0.20.13') not in requirement.specifier"
-          python -c "import hashlib, importlib.resources as r, json; from dcc_mcp_core.deployment import load_install_sop_schema; raw = r.files('dcc_mcp_core').joinpath('schemas', 'adapter-install-sop-v1.schema.json').read_bytes(); assert len(raw) == 4261 and hashlib.sha256(raw).hexdigest() == '3ca25788439917b4d4c0617230a762f9797756b5b54f45c8c4149f975b90f904' and b'\r\n' not in raw; assert load_install_sop_schema() == json.loads(raw)"
+          python -c "import importlib.metadata as m; from packaging.requirements import Requirement; from packaging.version import Version; requirement = next(Requirement(item) for item in m.requires('dcc-mcp-sketchup') if Requirement(item).name == 'dcc-mcp-core'); assert Version('0.20.36') in requirement.specifier and Version('0.20.35') not in requirement.specifier"
+          # Assert the Install SOP contract semantically, not by fingerprint.
+          # A length/digest pin on a schema file owned by dcc-mcp-core breaks on
+          # every core release -- and it broke here on a copy/paste that paired
+          # the v1 digest with the v2 path. The adapter only depends on the
+          # schema core publishes agreeing with the value the adapter stamps.
+          python - <<'PY'
+          import importlib.resources as r
+          import json
+
+          from dcc_mcp_core.deployment import load_install_sop_schema
+          from jsonschema import Draft202012Validator
+
+          from dcc_mcp_sketchup import install as install_module
+
+          schema = load_install_sop_schema()
+          Draft202012Validator.check_schema(schema)
+          filename = schema["$id"].rsplit("/", 1)[-1]
+          raw = r.files("dcc_mcp_core").joinpath("schemas", filename).read_bytes()
+          assert b"\r\n" not in raw, "schema file has CRLF line endings"
+          assert json.loads(raw) == schema, "packaged schema differs from loaded schema"
+          declared = schema["properties"]["schema_version"]["const"]
+          assert declared == install_module.SCHEMA_VERSION, (
+              declared,
+              install_module.SCHEMA_VERSION,
+          )
+          print("install SOP schema OK:", filename, "schema_version", declared)
+          PY
       - name: Install lifecycle round trip
         shell: bash
         run: |

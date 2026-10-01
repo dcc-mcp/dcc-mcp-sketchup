@@ -32,17 +32,18 @@ from dcc_mcp_core.deployment import (
     INSTALL_EXIT_VERIFY,
     INSTALL_SOP_SCHEMA_VERSION,
     inspect_install_root,
+    load_install_sop_schema,
     safe_remove_tree,
     wait_for_sidecar_ready,
 )
 
 from .__version__ import __version__
+from .compat import SUPPORTED, classify_host, unsupported_reason
 
 EXTENSION_DIRECTORY = "dcc_mcp_sketchup"
 REGISTRATION_FILENAME = "dcc_mcp_sketchup.rb"
 MIN_SKETCHUP_VERSION = 2021
-MIN_CORE_VERSION = "0.20.14"
-SCHEMA_VERSION = INSTALL_SOP_SCHEMA_VERSION
+MIN_CORE_VERSION = "0.20.36"
 RECEIPT_RELATIVE_PATH = Path(".dcc-mcp") / "receipts" / "sketchup.json"
 BOOTSTRAP_ERRORS_RELATIVE_PATH = Path(".dcc-mcp") / "logs" / "sketchup-bootstrap-errors.jsonl"
 EXIT_OK = INSTALL_EXIT_OK
@@ -51,6 +52,33 @@ EXIT_ACQUIRE = INSTALL_EXIT_ACQUIRE
 EXIT_INSTALL = INSTALL_EXIT_INSTALL
 EXIT_VERIFY = INSTALL_EXIT_VERIFY
 EXIT_REQUIRES_RESTART = INSTALL_EXIT_REQUIRES_RESTART
+
+
+def _install_sop_schema_version() -> object:
+    """Return the ``schema_version`` the packaged Install SOP schema accepts.
+
+    ``INSTALL_SOP_SCHEMA_VERSION`` is the version of the SOP document core
+    ships. From core 0.20.36 onward that constant moved to ``2`` and the schema
+    file was renamed to ``adapter-install-sop-v2.schema.json``, but the schema
+    body still declares ``properties.schema_version.const == 1``. Stamping the
+    constant into a report therefore produces a report that fails validation
+    against the very schema core publishes -- which is how this module surfaced
+    the mismatch.
+
+    The schema is the authority on its own payload contract, so the value is
+    read from the schema it will be validated against and the constant is only
+    a fallback. This keeps full schema validation on both core 0.20.14
+    (constant 1, schema const 1) and core 0.20.36 (constant 2, schema const 1),
+    instead of weakening the validator to accept either.
+    """
+    try:
+        declared = load_install_sop_schema()["properties"]["schema_version"].get("const")
+    except Exception:
+        declared = None
+    return declared if isinstance(declared, int) else INSTALL_SOP_SCHEMA_VERSION
+
+
+SCHEMA_VERSION = _install_sop_schema_version()
 _VERSION_RE = re.compile(r"SketchUp\s+(\d{4})$")
 _VERSION_COMPONENT_RE = re.compile(r"^(?:0|[1-9][0-9]{0,5})$")
 _MAX_VERSION_LENGTH = 32
@@ -1505,6 +1533,90 @@ def _install_from_report(
         safe_remove_tree(staging_root)
 
 
+def host_matrix_check(plugins_dir: Optional[Path] = None) -> dict[str, Any]:
+    """Classify the SketchUp host for one versioned profile against the matrix.
+
+    ``plugins_dir`` scopes the check to the profile being operated on. That is
+    the only defensible scope: the installer verifies a *specific* versioned
+    profile, and a SketchUp 2024 install elsewhere on the machine says nothing
+    about whether the extension in this 2026 profile will run. The product year
+    is read from the profile path, which is the same axis the installer already
+    uses to match a host executable to its profile.
+
+    With no ``plugins_dir`` the check falls back to global discovery, which is
+    what the ``doctor`` wants when it is asked "what is on this machine?".
+
+    Informational when nothing can be resolved. Linux has no SketchUp release
+    at all, so "nothing discovered" is a normal state that the readiness check
+    below already gates on. Only a host that was actually resolved *and* found
+    unsupported fails here, so the installer refuses to hand a
+    supported-looking install to a SketchUp the adapter never verified.
+    """
+    if plugins_dir is not None:
+        year = _plugin_dir_version(plugins_dir)
+        if not year:
+            return {
+                "success": False,
+                "discovered": False,
+                "scope": "profile",
+                "reason": "The selected profile directory is not a versioned SketchUp profile",
+            }
+        return _verdict_entry(str(year), scope="profile", installations=[])
+
+    try:
+        installs = discover_host_installations()
+    except Exception as exc:  # discovery touches the filesystem; never fatal here
+        return {
+            "success": False,
+            "discovered": False,
+            "scope": "machine",
+            "reason": "SketchUp host discovery failed: %s" % exc,
+        }
+    if not installs:
+        return {
+            "success": False,
+            "discovered": False,
+            "scope": "machine",
+            "reason": "No installed SketchUp host was discovered on this platform",
+        }
+    version = ""
+    for item in installs:
+        candidate = item.get("native_version") or (
+            str(item["profile_year"]) if item.get("profile_year") else ""
+        )
+        if candidate:
+            version = str(candidate)
+            break
+    if not version:
+        return {
+            "success": False,
+            "discovered": True,
+            "scope": "machine",
+            "installations": installs,
+            "reason": "A SketchUp profile exists but no host version could be read",
+        }
+    return _verdict_entry(version, scope="machine", installations=installs)
+
+
+def _verdict_entry(version: str, scope: str, installations: list[dict[str, Any]]) -> dict[str, Any]:
+    verdict = classify_host(version)
+    entry: dict[str, Any] = {
+        "success": verdict["status"] == SUPPORTED,
+        "discovered": True,
+        "scope": scope,
+        "version": version,
+        "product_year": verdict.get("product_year"),
+        "status": verdict["status"],
+        "matrix_version": verdict.get("matrix_version"),
+        "supported_ranges": verdict.get("supported_ranges"),
+        "evidence_level": verdict.get("evidence_level"),
+        "installations": installations,
+    }
+    if not entry["success"]:
+        entry["reason"] = unsupported_reason(verdict)
+    return entry
+
+
 def verify_install(
     plugins_dir: Path,
     python: Path,
@@ -1526,6 +1638,7 @@ def verify_install(
         "import": {"success": False},
         "bootstrap": {"success": False},
         "readiness": {"success": False},
+        "host_matrix": {"success": False, "discovered": False},
     }
     if receipt is None or not target.is_dir() or not registration.is_file():
         result.update(
@@ -1551,6 +1664,14 @@ def verify_install(
                 f"selected interpreter {python.resolve()} differs from receipt {receipt_python}; "
                 "run upgrade --yes with the intended --python interpreter"
             ),
+        )
+        return result
+
+    result["host_matrix"] = host_matrix_check(plugins_dir)
+    if result["host_matrix"].get("discovered") and not result["host_matrix"].get("success"):
+        result.update(
+            failure_stage="host_version",
+            failure_reason=result["host_matrix"].get("reason"),
         )
         return result
 
@@ -2022,6 +2143,38 @@ def uninstall_extension(plugins_dir: Path) -> bool:
         raise RuntimeError("refusing to remove an unreceipted SketchUp extension")
     _transactional_uninstall(root, receipt)
     return True
+
+
+def discover_host_installations() -> list[dict[str, Any]]:
+    """Return every locally installed SketchUp host, newest product year first.
+
+    Public because the ``doctor`` reports on installed hosts without performing
+    an install; keeping the platform discovery here means the doctor and the
+    installer can never disagree about what is on the machine.
+
+    ``native_version`` is read from the executable or application bundle
+    itself, so it is the version SketchUp will actually report, not the version
+    the profile directory was named after. A host whose native read fails still
+    appears, with ``native_version_error`` set, because a broken read is itself
+    a finding the doctor should surface rather than hide.
+    """
+    installs: list[dict[str, Any]] = []
+    for plugins_dir in discover_plugin_dirs():
+        version = _plugin_dir_version(plugins_dir)
+        host = _discover_host_for_version(version) if version else None
+        entry: dict[str, Any] = {
+            "plugins_dir": str(plugins_dir),
+            "profile_year": version or None,
+            "host_path": str(host) if host is not None else None,
+            "native_version": None,
+        }
+        if host is not None:
+            try:
+                entry["native_version"] = _native_host_version(host)
+            except (InstallFailure, OSError) as exc:
+                entry["native_version_error"] = str(exc)
+        installs.append(entry)
+    return installs
 
 
 def _plugin_dir_version(path: Path) -> int:

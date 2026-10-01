@@ -11,8 +11,15 @@ from dataclasses import dataclass
 from typing import Any, Optional
 from uuid import uuid4
 
+from .write_contract import WRITE_VERIFICATION_CODE, WriteVerificationError
+
 MAX_MESSAGE_BYTES = 1024 * 1024
 _LOOPBACK_HOSTS = {"127.0.0.1"}
+
+# Timeout for the live host handshake the doctor runs. Deliberately short: the
+# sidecar is launched by SketchUp and answers bridge.health immediately, so a
+# long timeout would only make an unreachable host look slow rather than absent.
+STATUS_TIMEOUT_SECS = 8.0
 
 
 class BridgeError(RuntimeError):
@@ -71,7 +78,7 @@ class SketchupBridge:
 
     def status(self) -> dict[str, Any]:
         try:
-            result = self.call("bridge.health", timeout=min(self._config.timeout, 8.0))
+            result = self.call("bridge.health", timeout=STATUS_TIMEOUT_SECS)
         except (BridgeError, OSError, ValueError) as exc:
             return {
                 "ready": False,
@@ -145,6 +152,13 @@ class SketchupBridge:
             if isinstance(error, dict):
                 code = str(error.get("code") or "host_error")
                 message = str(error.get("message") or "SketchUp command failed")
+                if code == WRITE_VERIFICATION_CODE:
+                    # A read-back disagreement carries its structured payload
+                    # under `data`. Rebuild the exception here so the caller
+                    # branches on check/expected/actual instead of parsing prose.
+                    payload = error.get("data")
+                    if isinstance(payload, dict):
+                        raise WriteVerificationError.from_payload(payload)
                 raise BridgeError(f"{code}: {message}")
             raise BridgeError(str(error))
         if "result" not in envelope:

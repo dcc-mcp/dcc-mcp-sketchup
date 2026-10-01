@@ -306,6 +306,17 @@ module DccMcp
                    @commands.execute(request.method, request.params.dup)
                  end
         { 'result' => result }
+      rescue VerificationFailure => e
+        # The read-back payload has to survive the trip to the Python side, so
+        # it is forwarded verbatim under `data` instead of being flattened into
+        # a message string. bridge.py rebuilds WriteVerificationError from it.
+        {
+          'error' => {
+            'code' => e.payload['code'] || Verification::ERROR_CODE,
+            'message' => e.message,
+            'data' => e.payload
+          }
+        }
       rescue StandardError => e
         { 'error' => { 'code' => 'host_error', 'message' => e.message } }
       end

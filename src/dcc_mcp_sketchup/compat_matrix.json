@@ -1,0 +1,248 @@
+{
+  "schema_version": 1,
+  "host": "sketchup",
+  "matrix_version": "2026-09-30",
+  "version_axis": "product_year",
+  "notes": "Single source of truth for SketchUp host support. Read by dcc_mcp_sketchup.compat (host-side Python) and embedded verbatim in doctor/verify reports. A product year outside `supported_ranges` is rejected with an explicit error code; it is never silently downgraded to 'probably fine'. `version_axis` is `product_year`: SketchUp reports either '2026.0' or '26.0.575', and both normalise to product year 2026 (see compat.normalize_version).",
+  "evidence_bound": {
+    "level": "contract",
+    "host_level": "none",
+    "reason": "The bridge is a Ruby extension loaded inside the SketchUp desktop application. GitHub-hosted runners cannot install or launch licensed SketchUp, so no host-level end-to-end evidence exists in CI.",
+    "what_contract_evidence_proves": "The Ruby command layer honours its contract: bounded command map, parameter validation, typed coercion, single undo operation per mutation, and post-write read-back. Verified against a stubbed SketchUp API, not a real host.",
+    "what_contract_evidence_does_not_prove": "That the commands were executed by a real SketchUp process, or that the SketchUp Ruby API on a given product year behaves as the stubs do. Contract green is not host green."
+  },
+  "executable_names": [
+    "SketchUp.exe",
+    "SketchUp"
+  ],
+  "ruby_contract": {
+    "ci_ruby_versions": [
+      "2.7",
+      "3.2"
+    ],
+    "note": "Ruby syntax check plus Ruby contract tests run on these versions in CI. The Ruby version embedded in a given SketchUp build is reported by the live host through diagnostics.ping ('ruby_version') and recorded by the doctor; it is observed, never assumed from this file."
+  },
+  "supported_ranges": [
+    {
+      "id": "2021",
+      "min_version": "2021.0",
+      "max_version": "2021.9999",
+      "status": "supported",
+      "evidence_level": "contract",
+      "evidence": "Ruby contract suite green on Ruby 2.7 and 3.2 against the stubbed SketchUp 2026 API surface; no host run. Declared supported because the entire API surface listed in `api_surface` predates the 2021 baseline."
+    },
+    {
+      "id": "2022",
+      "min_version": "2022.0",
+      "max_version": "2022.9999",
+      "status": "supported",
+      "evidence_level": "contract",
+      "evidence": "Same contract suite; no host run. No API surface change declared against 2021."
+    },
+    {
+      "id": "2023",
+      "min_version": "2023.0",
+      "max_version": "2023.9999",
+      "status": "supported",
+      "evidence_level": "contract",
+      "evidence": "Same contract suite; no host run. No API surface change declared against 2022."
+    },
+    {
+      "id": "2024",
+      "min_version": "2024.0",
+      "max_version": "2024.9999",
+      "status": "supported",
+      "evidence_level": "contract",
+      "evidence": "Same contract suite; no host run. No API surface change declared against 2023."
+    },
+    {
+      "id": "2025",
+      "min_version": "2025.0",
+      "max_version": "2025.9999",
+      "status": "supported",
+      "evidence_level": "contract",
+      "evidence": "Same contract suite; no host run. No API surface change declared against 2024."
+    },
+    {
+      "id": "2026",
+      "min_version": "2026.0",
+      "max_version": "2026.9999",
+      "status": "supported",
+      "evidence_level": "contract",
+      "evidence": "Same contract suite; no host run. The stubbed API surface in tests/ruby is pinned to SketchUp 2026, so this is the year whose API shape the contract tests actually mirror."
+    }
+  ],
+  "api_surface": [
+    {
+      "owner": "Sketchup::Model",
+      "symbol": "find_entity_by_persistent_id",
+      "used_by": [
+        "entity.transform",
+        "entity.rename",
+        "entity.erase",
+        "entity.select",
+        "materials.assign",
+        "tags.assign"
+      ],
+      "required": true,
+      "role": "read-back",
+      "note": "The post-write read-back resolves every mutated entity through its persistent id, so this symbol is load-bearing for the write verification contract."
+    },
+    {
+      "owner": "Sketchup::Model",
+      "symbol": "start_operation",
+      "used_by": [
+        "all mutating commands"
+      ],
+      "required": true,
+      "role": "mutation"
+    },
+    {
+      "owner": "Sketchup::Model",
+      "symbol": "commit_operation",
+      "used_by": [
+        "all mutating commands"
+      ],
+      "required": true,
+      "role": "mutation"
+    },
+    {
+      "owner": "Sketchup::Entities",
+      "symbol": "add_group",
+      "used_by": [
+        "geometry.add_box",
+        "geometry.add_cylinder",
+        "geometry.group"
+      ],
+      "required": true,
+      "role": "mutation"
+    },
+    {
+      "owner": "Sketchup::Entities",
+      "symbol": "add_face",
+      "used_by": [
+        "geometry.add_box",
+        "geometry.add_cylinder"
+      ],
+      "required": true,
+      "role": "mutation"
+    },
+    {
+      "owner": "Sketchup::Entities",
+      "symbol": "add_circle",
+      "used_by": [
+        "geometry.add_cylinder"
+      ],
+      "required": true,
+      "role": "mutation"
+    },
+    {
+      "owner": "Sketchup::Face",
+      "symbol": "pushpull",
+      "used_by": [
+        "geometry.add_box",
+        "geometry.add_cylinder"
+      ],
+      "required": true,
+      "role": "mutation"
+    },
+    {
+      "owner": "Sketchup::Entities",
+      "symbol": "transform_entities",
+      "used_by": [
+        "entity.transform"
+      ],
+      "required": true,
+      "role": "mutation"
+    },
+    {
+      "owner": "Sketchup::Entities",
+      "symbol": "erase_entities",
+      "used_by": [
+        "entity.erase"
+      ],
+      "required": true,
+      "role": "mutation"
+    },
+    {
+      "owner": "Sketchup::Material",
+      "symbol": "alpha=",
+      "used_by": [
+        "materials.create",
+        "materials.update"
+      ],
+      "required": true,
+      "role": "mutation"
+    },
+    {
+      "owner": "Sketchup::Page",
+      "symbol": "include_in_animation=",
+      "used_by": [
+        "scenes.create",
+        "scenes.update"
+      ],
+      "required": false,
+      "role": "mutation",
+      "note": "Guarded by respond_to? because the accessor is absent on older builds; a missing symbol is reported by the probe instead of failing the call."
+    }
+  ],
+  "breaking_changes": [
+    {
+      "id": "entities-transform-return-value",
+      "title": "Sketchup::Entities#transform_entities return value is not a success signal on every build",
+      "changed_in": "unknown",
+      "applies_from": "2021.0",
+      "kind": "behaviour",
+      "removed_symbol": "Sketchup::Entities#transform_entities",
+      "replacement": "Post-write read-back of the transformed entity bounds",
+      "probe": {
+        "module": "Sketchup::Entities",
+        "attribute": "transform_entities",
+        "expected_on_or_after_changed_in": "present",
+        "expected_before_changed_in": "unverified"
+      },
+      "symptom": "The API returns an entity array in some builds and a truthy count in others, so a caller that branches on the return value can report success for a transform that never applied.",
+      "adapter_usage": "guarded",
+      "enforcement": "postcondition",
+      "remediation": "entity.transform no longer trusts the return value. It records the entity bounds centre before the call and reads it back afterwards, requiring the centre to have moved by the requested translation. Rotation and scaling are applied about the entity centre, which leaves the centre invariant, so the translation is the only component the centre must reflect."
+    },
+    {
+      "id": "material-alpha-silently-dropped",
+      "title": "Sketchup::Material#alpha= can be accepted without changing the rendered alpha",
+      "changed_in": "unknown",
+      "applies_from": "2021.0",
+      "kind": "behaviour",
+      "removed_symbol": "Sketchup::Material#alpha=",
+      "replacement": "Post-write read-back of material.alpha",
+      "probe": {
+        "module": "Sketchup::Material",
+        "attribute": "alpha",
+        "expected_on_or_after_changed_in": "present",
+        "expected_before_changed_in": "unverified"
+      },
+      "symptom": "The setter exists and raises nothing, so a caller sees 'material updated' while the alpha is unchanged and the render is wrong.",
+      "adapter_usage": "guarded",
+      "enforcement": "postcondition",
+      "remediation": "materials.create and materials.update read alpha back and report expected versus actual, naming the host product year."
+    },
+    {
+      "id": "pushpull-degenerate-geometry",
+      "title": "Face#pushpull can return without producing volume",
+      "changed_in": "unknown",
+      "applies_from": "2021.0",
+      "kind": "behaviour",
+      "removed_symbol": "Sketchup::Face#pushpull",
+      "replacement": "Post-write read-back of the created group bounds",
+      "probe": {
+        "module": "Sketchup::Face",
+        "attribute": "pushpull",
+        "expected_on_or_after_changed_in": "present",
+        "expected_before_changed_in": "unverified"
+      },
+      "symptom": "A box or cylinder is reported created with the right name while its bounding box is empty or flat, so downstream volume and export work silently operates on nothing.",
+      "adapter_usage": "guarded",
+      "enforcement": "postcondition",
+      "remediation": "geometry.add_box and geometry.add_cylinder read the created group's bounding box back and require the extents to match the requested dimensions within tolerance."
+    }
+  ]
+}
