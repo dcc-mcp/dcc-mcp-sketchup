@@ -30,7 +30,6 @@ from dcc_mcp_core.deployment import (
     INSTALL_EXIT_PREFLIGHT,
     INSTALL_EXIT_REQUIRES_RESTART,
     INSTALL_EXIT_VERIFY,
-    INSTALL_SOP_SCHEMA_VERSION,
     inspect_install_root,
     load_install_sop_schema,
     safe_remove_tree,
@@ -39,6 +38,24 @@ from dcc_mcp_core.deployment import (
 
 from .__version__ import __version__
 from .compat import SUPPORTED, classify_host, unsupported_reason
+
+try:
+    # Core 0.20.40 added this function, which answers the question this module
+    # asks: what does a report's `schema_version` have to carry? It stays
+    # optional because the declared core floor (0.20.36) is older than 0.20.40
+    # and a hard import would make the package unimportable on every core in
+    # the declared range below it.
+    from dcc_mcp_core.deployment import install_sop_report_schema_version
+except ImportError:  # Core older than 0.20.40
+    install_sop_report_schema_version = None
+
+# Last-resort value for the report's own ``schema_version`` field, used only when
+# neither Core nor its schema document can answer. It is deliberately NOT the
+# revision of the published schema *artifact* (``INSTALL_SOP_SCHEMA_REVISION``,
+# 2 since core 0.20.36): that counter names the artifact, while this field is
+# pinned by the artifact at ``properties.schema_version.const`` and stays at 1,
+# because artifact revisions only add optional members.
+FALLBACK_REPORT_SCHEMA_VERSION = 1
 
 EXTENSION_DIRECTORY = "dcc_mcp_sketchup"
 REGISTRATION_FILENAME = "dcc_mcp_sketchup.rb"
@@ -54,28 +71,38 @@ EXIT_VERIFY = INSTALL_EXIT_VERIFY
 EXIT_REQUIRES_RESTART = INSTALL_EXIT_REQUIRES_RESTART
 
 
-def _install_sop_schema_version() -> object:
+def _install_sop_schema_version() -> int:
     """Return the ``schema_version`` the packaged Install SOP schema accepts.
 
-    ``INSTALL_SOP_SCHEMA_VERSION`` is the version of the SOP document core
-    ships. From core 0.20.36 onward that constant moved to ``2`` and the schema
-    file was renamed to ``adapter-install-sop-v2.schema.json``, but the schema
-    body still declares ``properties.schema_version.const == 1``. Stamping the
-    constant into a report therefore produces a report that fails validation
-    against the very schema core publishes -- which is how this module surfaced
-    the mismatch.
+    The value is the ``const`` the schema pins on ``properties.schema_version``,
+    which is a different counter from the revision of the schema *artifact*
+    itself. From core 0.20.36 onward the artifact revision moved to ``2`` and
+    the schema file was renamed to ``adapter-install-sop-v2.schema.json``, but
+    the schema body still declares ``properties.schema_version.const == 1``.
+    Stamping the artifact revision into a report therefore produces a document
+    that fails validation against the very schema core publishes -- which is
+    how this module surfaced the mismatch.
 
-    The schema is the authority on its own payload contract, so the value is
-    read from the schema it will be validated against and the constant is only
-    a fallback. This keeps full schema validation on both core 0.20.14
-    (constant 1, schema const 1) and core 0.20.36 (constant 2, schema const 1),
-    instead of weakening the validator to accept either.
+    Core 0.20.40 answers the question directly through
+    ``install_sop_report_schema_version()``; prefer it so the adapter follows
+    core if a future revision ever moves the const. The local schema read is
+    the fallback for cores 0.20.36 through 0.20.39 in the declared range, and
+    the constant covers a core whose schema document cannot be read at all.
     """
+    if install_sop_report_schema_version is not None:
+        try:
+            return int(install_sop_report_schema_version())
+        except (RuntimeError, OSError, ValueError):
+            # A core that cannot read or verify its own schema document must
+            # still let this module report on the broken installation.
+            pass
     try:
         declared = load_install_sop_schema()["properties"]["schema_version"].get("const")
     except Exception:
         declared = None
-    return declared if isinstance(declared, int) else INSTALL_SOP_SCHEMA_VERSION
+    if isinstance(declared, int) and not isinstance(declared, bool):
+        return declared
+    return FALLBACK_REPORT_SCHEMA_VERSION
 
 
 SCHEMA_VERSION = _install_sop_schema_version()

@@ -64,11 +64,13 @@ def test_install_reports_use_the_published_core_schema_and_constants():
     assert not (fixture_dir / "adapter-install-sop-v1.schema.json").exists()
     assert not (fixture_dir / "README.md").exists()
 
-    # Deliberately NOT asserted: install.SCHEMA_VERSION == INSTALL_SOP_SCHEMA_VERSION.
-    # From core 0.20.36 the constant is 2 while the schema body still requires the
-    # report field `schema_version` to be 1, so asserting equality pins the adapter
-    # to a value the schema it is validated against rejects. The invariant that
-    # matters is asserted above: the stamped value is the one the schema accepts.
+    # Deliberately NOT asserted: install.SCHEMA_VERSION == the schema artifact
+    # revision (`INSTALL_SOP_SCHEMA_REVISION`, `INSTALL_SOP_SCHEMA_VERSION`
+    # before core 0.20.40). Since core 0.20.36 that revision is 2 while the
+    # schema body still requires the report field `schema_version` to be 1, so
+    # asserting equality pins the adapter to a value the schema it is validated
+    # against rejects. The invariant that matters is asserted above: the stamped
+    # value is the one the schema accepts.
     assert (
         install.EXIT_OK,
         install.EXIT_PREFLIGHT,
