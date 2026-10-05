@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0](https://github.com/dcc-mcp/dcc-mcp-sketchup/compare/v0.2.0...v0.3.0) (2026-10-04)
+
+
+### Features
+
+* host compatibility matrix, doctor, and cross-Ruby write verification ([15bc231](https://github.com/dcc-mcp/dcc-mcp-sketchup/commit/15bc231a89069e500d2261dc5b2996ca0c886b36))
+
+
+### Bug Fixes
+
+* read the Install SOP report schema version from Core ([d9685e3](https://github.com/dcc-mcp/dcc-mcp-sketchup/commit/d9685e305b8b935ea70668cb05bc76e6b01428b9))
+
 ## [0.2.0](https://github.com/dcc-mcp/dcc-mcp-sketchup/compare/v0.1.0...v0.2.0) (2026-08-24)
 
 

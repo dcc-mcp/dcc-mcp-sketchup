@@ -9,7 +9,7 @@ module DccMcp
       MAX_LIST_ITEMS = 500
       MAX_OPTION_KEYS = 64
       MAX_PROBE_SYMBOLS = 128
-      ADAPTER_VERSION = '0.2.0' # x-release-please-version
+      ADAPTER_VERSION = '0.3.0' # x-release-please-version
       OPTION_KEY_PATTERN = /\A[a-z][a-z0-9_]{0,63}\z/.freeze
       PROBE_ENTRY_PATTERN = /\A[A-Z][A-Za-z0-9]*(?:::[A-Z][A-Za-z0-9]*)*[#.][A-Za-z_][A-Za-z0-9_]*[?!=]?\z/.freeze
       IMPORT_EXTENSIONS = %w[.3ds .dae .dwg .dxf .ifc .kmz .obj .skp .stl].freeze
