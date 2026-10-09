@@ -11,7 +11,7 @@ metadata:
   dcc-mcp:
     dcc: sketchup
     layer: domain
-    version: "0.3.0"  # x-release-please-version
+    version: "0.3.1"  # x-release-please-version
     stage: lookdev
     search-hint: "SketchUp materials colors textures assign front back face remove"
     tags: "sketchup,materials,lookdev,textures"

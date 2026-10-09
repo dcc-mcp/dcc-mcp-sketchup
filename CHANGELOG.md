@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.1](https://github.com/dcc-mcp/dcc-mcp-sketchup/compare/v0.3.0...v0.3.1) (2026-10-09)
+
+
+### Bug Fixes
+
+* **ci:** cut release PRs with a collaborator token ([#10](https://github.com/dcc-mcp/dcc-mcp-sketchup/issues/10)) ([b798183](https://github.com/dcc-mcp/dcc-mcp-sketchup/commit/b7981838eca24996e7e9c2959af1463162022f66))
+
+
+### Documentation
+
+* add the generated DCC-MCP host matrix pointer ([9ef3058](https://github.com/dcc-mcp/dcc-mcp-sketchup/commit/9ef3058965ed9cb847d4cb404030823462dbebc9))
+
 ## [0.3.0](https://github.com/dcc-mcp/dcc-mcp-sketchup/compare/v0.2.0...v0.3.0) (2026-10-04)
 
 
