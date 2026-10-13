@@ -45,7 +45,7 @@ from .compat import (
     classify_host,
     load_matrix,
     missing_required_api,
-    normalize_version,
+    parse_version,
     product_year,
     required_api_surface,
     supported_range_labels,
@@ -80,7 +80,15 @@ def _host_error_code(status: str) -> str:
 
 
 def _version_tuple(value: str) -> Optional[tuple[int, int, int]]:
-    return normalize_version(value)
+    """Parse a package version (``dcc-mcp-core``), not a SketchUp host version.
+
+    Uses :func:`parse_version` rather than :func:`normalize_version`: the latter
+    folds two-digit build lines onto the product-year axis, which is the rule
+    for SketchUp host versions and meaningless for a Python package whose major
+    is ``0``. Reusing the host normaliser here made ``0.20.44`` unparseable and
+    reported an up-to-date core as unsupported.
+    """
+    return parse_version(value)
 
 
 def _command_step(

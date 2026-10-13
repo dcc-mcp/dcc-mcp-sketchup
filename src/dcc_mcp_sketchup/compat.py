@@ -15,6 +15,17 @@ A host version that is not covered by the matrix is reported as unsupported with
 the covered ranges and a concrete remediation. Nothing here degrades silently:
 an unrecognised or out-of-range version never becomes "good enough".
 
+Two distinct verdicts cover the ways a version can fail to place, and they are
+deliberately kept apart because they send triage in different directions:
+
+* ``unknown`` -- the value is not a SketchUp version this module can read. The
+  fix is on the reporting side (what did the host actually say?).
+* ``too_new`` -- the value is a real product year that sits above the verified
+  matrix. The fix is on the verification side (the matrix needs a new range).
+
+Folding a build line that cannot be one (``999`` -> ``2999``) used to collapse
+the first into the second, so a parse failure was reported as "too new".
+
 Evidence level
 --------------
 The matrix is honest about how weak its evidence is. SketchUp is a licensed
@@ -53,6 +64,13 @@ STATUS_MESSAGES = {
 # directory yields, and it is a real product year rather than a parse failure.
 _RELEASE = re.compile(r"^(\d+)(?:\.(\d+))?(?:\.(\d+))?")
 _YEAR_CUTOFF = 2000
+# The span of majors that can still be a SketchUp build line. SketchUp build
+# lines are two digits ("26" for 2026), so the accepted span is 10..99: wide
+# enough for early and future lines, narrow enough that a three-digit major
+# (999) or a stray four-digit one (1999) is rejected as unparseable instead of
+# being folded into a year.
+_BUILD_LINE_MIN = 10
+_BUILD_LINE_MAX = 99
 
 Version = Tuple[int, int, int]
 
@@ -81,12 +99,26 @@ def normalize_version(value: str) -> Optional[Version]:
     SketchUp build line and has 2000 added to it, which is the same rule the
     installer uses when it reconciles a native executable version against a
     versioned user profile.
+
+    Returning ``None`` means "this is not a SketchUp version I can place on the
+    year axis", not "this is a very new SketchUp". Only majors inside the
+    build-line span (:data:`_BUILD_LINE_MIN` .. :data:`_BUILD_LINE_MAX`) are
+    folded: a major outside it is neither a two-digit build line nor a product
+    year, so it is rejected here and :func:`classify_host` reports it as
+    ``unknown`` instead of inventing a year for it.
     """
     parsed = parse_version(value)
     if parsed is None:
         return None
     major, minor, patch = parsed
     if major < _YEAR_CUTOFF:
+        # Only a real build line is folded. SketchUp build lines are two digits
+        # ("26" for 2026), so anything outside _BUILD_LINE_MIN.._BUILD_LINE_MAX
+        # is not one: folding it would invent a year (999 -> 2999, 1999 ->
+        # 3999) and report a parse failure as "too new", sending triage the
+        # wrong way.
+        if major < _BUILD_LINE_MIN or major > _BUILD_LINE_MAX:
+            return None
         major += _YEAR_CUTOFF
     return major, minor, patch
 

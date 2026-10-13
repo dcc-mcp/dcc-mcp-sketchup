@@ -70,6 +70,11 @@ DEFAULT_ABS_TOLERANCE = 1e-9
 MUTATING = "mutating"
 READ_ONLY = "read_only"
 
+# The check name raised when a mutating result arrived with no read-back block
+# at all. It is a distinct case from a read-back that returned a different
+# value, and format_message has to word it differently.
+CHECK_READ_BACK_PRESENT = "read_back_present"
+
 # Tools that change the model or write a file. Every entry owes a read-back.
 MUTATING_TOOLS = (
     "model.save",
@@ -226,9 +231,37 @@ def format_message(payload: Dict[str, Any]) -> str:
     Deliberately states the tool, the check, both values, and the host version
     in that order: the reader should never have to re-run the call to find out
     what differed.
+
+    A missing read-back block is the one case where that shape loses the point.
+    ``read_back_present`` does not mean the host read back a different value; it
+    means it read back nothing, so "the read-back disagreed" describes a
+    disagreement that never happened. For that check the message leads with the
+    explanation raised by :func:`require_verification` -- the change is unproven,
+    not falsified -- and still reports what arrived so the caller can see why it
+    was rejected.
     """
     tool = payload.get("tool") or "unknown tool"
     check = payload.get("check") or "unknown check"
+    if check == CHECK_READ_BACK_PRESENT:
+        # Lead with the explanation, then append the same "; host SketchUp X
+        # (matrix status: Y)" tail every other failure carries. The tail is
+        # spelled identically here so a caller can grep for it on any write
+        # failure; missing_verification_message() capitalises its own sentence
+        # and is only used for the leading part.
+        message = "%s Rejected result: %s" % (
+            missing_verification_message(tool),
+            _describe(payload.get("actual")),
+        )
+        version = payload.get("host_version")
+        if version:
+            message += "; host SketchUp %s" % version
+        matrix = payload.get("host_matrix") or {}
+        if matrix.get("status"):
+            message += " (matrix status: %s)" % matrix["status"]
+        remediation = payload.get("remediation")
+        if remediation:
+            message += ". %s" % remediation
+        return message
     message = (
         "%s did not take effect: the post-write read-back disagreed on %s "
         "(expected %s, read back %s)"
@@ -354,7 +387,7 @@ def require_verification(
     if not isinstance(verification, dict) or verification.get("verified") is not True:
         raise WriteVerificationError(
             tool=method,
-            check="read_back_present",
+            check=CHECK_READ_BACK_PRESENT,
             expected={"verification": {"verified": True}},
             actual=verification if verification is not None else result,
             host_version=host_version,
