@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.2](https://github.com/dcc-mcp/dcc-mcp-sketchup/compare/v0.3.1...v0.3.2) (2026-10-17)
+
+
+### Bug Fixes
+
+* replace no-op source-scan guard, split version verdicts, keep failure prose ([#15](https://github.com/dcc-mcp/dcc-mcp-sketchup/issues/15)) ([265224c](https://github.com/dcc-mcp/dcc-mcp-sketchup/commit/265224cb015972a929b794fafabecea1d1ac19ec))
+
+
+### Documentation
+
+* refresh the generated DCC-MCP host matrix pointer ([#13](https://github.com/dcc-mcp/dcc-mcp-sketchup/issues/13)) ([d0c9829](https://github.com/dcc-mcp/dcc-mcp-sketchup/commit/d0c9829addf4c27f5ac2d2ecfb22c50961a3e2d7))
+
 ## [0.3.1](https://github.com/dcc-mcp/dcc-mcp-sketchup/compare/v0.3.0...v0.3.1) (2026-10-13)
 
 
