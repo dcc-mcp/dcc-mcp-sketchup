@@ -222,11 +222,16 @@ def test_missing_evidence_message_survives_host_context(monkeypatch):
     """Attaching host context must not downgrade the explanation.
 
     require_verification raises with a message that explains *why* a missing
-    block is a failure rather than a pass. format_message renders the
-    expected/actual pair instead, so re-rendering on the way through host
-    context would trade the explanation for a diff. The structured payload is
-    the contract; the prose has to stay the one that tells the caller what to
-    do.
+    block is a failure rather than a pass. Re-rendering the payload on the way
+    through host context used to replace that explanation with a generic
+    expected/actual diff ("the read-back disagreed on read_back_present"), which
+    describes a disagreement that never happened -- nothing was read back. The
+    structured payload is the contract; the prose has to stay the one that tells
+    the caller what to do.
+
+    A missing block and a real value mismatch are different checks and must stay
+    worded differently, so this asserts both: the unproven wording is kept for
+    the missing block, and the disagreement wording is reserved for a mismatch.
     """
 
     def handler(request):
@@ -237,9 +242,41 @@ def test_missing_evidence_message_survives_host_context(monkeypatch):
     result = _failure_result(monkeypatch, handler)
 
     message = _error_meta(result).get("message") or ""
+    # The explanation survives: the change is unproven, not falsified.
+    assert "returned without post-write read-back evidence" in message
+    assert "did not take effect: the post-write read-back disagreed" not in message
+    # Host context is still attached on top of it.
+    assert "host SketchUp %s" % HOST_VERSION in message
+    assert "matrix status: supported" in message
+    # And the rejected result is still visible, so the caller can see why.
+    assert "{id: 42}" in message
+
+
+def test_real_mismatch_still_reports_a_disagreement(monkeypatch):
+    """The unproven wording is reserved for a missing block.
+
+    A read-back that returned a *different* value is a genuine disagreement and
+    must keep saying so. This pins the other side of the distinction, so the
+    read_back_present wording cannot spread to every verification failure.
+    """
+
+    def handler(request):
+        if request["method"] == "geometry.add_box":
+            return _envelope(
+                request,
+                error={
+                    "code": "write_verification_failed",
+                    "message": "read-back disagreed",
+                    "data": _error_payload(),
+                },
+            )
+        return _envelope(request, result={"sketchup_version": HOST_VERSION, "ready": True})
+
+    result = _failure_result(monkeypatch, handler)
+
+    message = _error_meta(result).get("message") or ""
     assert "did not take effect: the post-write read-back disagreed" in message
     assert "returned without post-write read-back evidence" not in message
-    assert "host SketchUp %s" % HOST_VERSION in message
 
 
 def test_unresolvable_host_degrades_to_the_original_error(monkeypatch):
@@ -298,17 +335,47 @@ def test_with_host_context_rejects_an_unusable_bridge():
     assert skill_tools._with_host_context(_BrokenBridge(), error) is error
 
 
-def test_every_mutating_tool_wraps_its_bridge_call():
-    """The guard for the gap this file was written for.
+def test_every_mutating_tool_wraps_its_bridge_call(monkeypatch):
+    """A Ruby read-back failure is annotated on the way out of bridge.call.
 
-    If bridge.call ever stops being wrapped, a Ruby read-back failure escapes
-    without host context again -- and nothing else in the suite would notice.
+    The previous version of this guard scanned the module source for
+    ``"except WriteVerificationError"`` and counted ``_with_host_context``
+    references. Deleting the ``try``/``except`` around ``bridge.call`` left both
+    conditions satisfied -- the ``require_verification`` path carries the same
+    ``except`` clause -- so the guard passed while the regression it claimed to
+    catch was live. Only three real behaviour tests went red.
+
+    This replacement drives the failure through ``bridge.call`` with a *bare*
+    error envelope (no ``host_version``), so the host has to be resolved from
+    the live handshake and the matrix verdict has to be computed. If the
+    wrapper around ``bridge.call`` is removed, the error escapes unannotated and
+    neither the host version nor the matrix status is present.
     """
-    import inspect
+    probed = []
 
-    source = inspect.getsource(skill_tools)
-    assert "except WriteVerificationError" in source
-    assert source.count("_with_host_context") >= 2
+    def handler(request):
+        probed.append(request["method"])
+        if request["method"] == "geometry.add_box":
+            return _envelope(
+                request,
+                error={
+                    "code": "write_verification_failed",
+                    "message": "read-back disagreed",
+                    "data": _error_payload(with_host=False),
+                },
+            )
+        return _envelope(request, result={"sketchup_version": HOST_VERSION, "ready": True})
+
+    result = _failure_result(monkeypatch, handler)
+
+    assert result["success"] is False
+    message = _error_meta(result).get("message") or ""
+    # Both annotations prove the error went through _with_host_context: the
+    # version was resolved from the handshake, and the verdict was recomputed.
+    assert "host SketchUp %s" % HOST_VERSION in message
+    assert "matrix status: supported" in message
+    # The handshake happened only because the envelope carried no version.
+    assert probed.count("bridge.health") == 1
 
 
 @pytest.mark.parametrize("method", ["geometry.add_box", "materials.create"])
