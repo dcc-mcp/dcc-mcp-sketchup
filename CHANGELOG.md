@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.3](https://github.com/dcc-mcp/dcc-mcp-sketchup/compare/v0.3.2...v0.3.3) (2026-11-15)
+
+
+### Documentation
+
+* refresh the generated DCC-MCP host matrix pointer ([1b9e1e2](https://github.com/dcc-mcp/dcc-mcp-sketchup/commit/1b9e1e23b60836a092479852486cbd28ac6770d9))
+* refresh the generated DCC-MCP host matrix pointer ([5268fc5](https://github.com/dcc-mcp/dcc-mcp-sketchup/commit/5268fc55fc9a0d9eea912a7308ed78b19f3f2355))
+
 ## [0.3.2](https://github.com/dcc-mcp/dcc-mcp-sketchup/compare/v0.3.1...v0.3.2) (2026-10-17)
 
 
